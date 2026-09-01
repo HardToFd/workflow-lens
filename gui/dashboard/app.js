@@ -680,42 +680,44 @@ function workflowGroupHeight(attemptCount) {
   return 92 + 46 + rows * 72 + Math.max(0, rows - 1) * 8 + 16;
 }
 
-function workflowLayout(events) {
+function workflowTransitionKey(transition) {
+  return `${transition.fromSequence}-${transition.toSequence}`;
+}
+
+function workflowLayout(events, reworkTransitions) {
   const groupWidth = 286;
-  const columnGap = 38;
-  const paddingX = 28;
-  const topY = 82;
+  const columnGap = 56;
+  const paddingX = 48;
+  const returnTrackTop = 52;
+  const returnTrackGap = 38;
+  const rankedTransitions = [...reworkTransitions].sort((left, right) => {
+    const leftSpan = STAGES.indexOf(left.from) - STAGES.indexOf(left.to);
+    const rightSpan = STAGES.indexOf(right.from) - STAGES.indexOf(right.to);
+    return rightSpan - leftSpan || left.fromSequence - right.fromSequence;
+  });
+  const returnLanes = new Map(rankedTransitions.map((transition, index) => [workflowTransitionKey(transition), index]));
+  const topY = reworkTransitions.length
+    ? returnTrackTop + Math.max(0, reworkTransitions.length - 1) * returnTrackGap + 52
+    : 52;
   const attemptCounts = Object.fromEntries(STAGES.map((stage) => [stage, events.filter((event) => event.stage === stage).length]));
-  const topHeight = Math.max(...STAGES.slice(0, 3).map((stage) => workflowGroupHeight(attemptCounts[stage])));
-  const bottomY = topY + topHeight + 58;
-  const bottomHeight = Math.max(...STAGES.slice(3).map((stage) => workflowGroupHeight(attemptCounts[stage])));
-  const width = paddingX * 2 + groupWidth * 3 + columnGap * 2;
-  const height = bottomY + bottomHeight + 48;
+  const groupHeight = Math.max(...STAGES.map((stage) => workflowGroupHeight(attemptCounts[stage])));
+  const width = paddingX * 2 + groupWidth * STAGES.length + columnGap * (STAGES.length - 1);
+  const height = topY + groupHeight + 48;
   const positions = new Map(STAGES.map((stage, index) => {
-    const row = index < 3 ? 0 : 1;
-    const column = row === 0 ? index : STAGES.length - 1 - index;
     return [stage, {
       stage,
-      row,
-      column,
-      x: paddingX + column * (groupWidth + columnGap),
-      y: row === 0 ? topY : bottomY,
+      column: index,
+      x: paddingX + index * (groupWidth + columnGap),
+      y: topY,
       width: groupWidth,
       summaryHeight: 92,
     }];
   }));
-  return { width, height, positions };
+  return { width, height, positions, returnLanes, returnTrackTop, returnTrackGap, topY };
 }
 
-function workflowMainRoute(from, to, layout) {
-  if (from.row === to.row) {
-    const leftToRight = to.x > from.x;
-    return leftToRight
-      ? `M${from.x + from.width},${from.y + from.summaryHeight / 2} H${to.x}`
-      : `M${from.x},${from.y + from.summaryHeight / 2} H${to.x + to.width}`;
-  }
-  const outsideX = layout.width - 14;
-  return `M${from.x + from.width},${from.y + from.summaryHeight / 2} H${outsideX} V${to.y + to.summaryHeight / 2} H${to.x + to.width}`;
+function workflowMainRoute(from, to) {
+  return `M${from.x + from.width},${from.y + from.summaryHeight / 2} H${to.x}`;
 }
 
 function workflowReworkTransitions(events) {
@@ -727,33 +729,31 @@ function workflowReworkTransitions(events) {
       to: event.stage,
       fromSequence: index + 1,
       toSequence: index + 2,
+      fromResult: previous.result,
+      toResult: event.result,
     }];
   });
 }
 
-function workflowReworkRoute(transition, transitionIndex, layout) {
+function workflowReworkRoute(transition, layout) {
   const from = layout.positions.get(transition.from);
   const to = layout.positions.get(transition.to);
+  const lane = layout.returnLanes.get(workflowTransitionKey(transition)) || 0;
   const fromX = from.x + from.width / 2;
-  const toX = to.x + to.width / 2;
-  if (from.row === to.row) {
-    const topChannel = from.row === 0;
-    const channelY = topChannel ? 28 + transitionIndex * 14 : layout.height - 24 - transitionIndex * 14;
-    const fromY = topChannel ? from.y : from.y + from.summaryHeight;
-    const toY = topChannel ? to.y : to.y + to.summaryHeight;
-    return {
-      path: `M${fromX},${fromY} C${fromX},${channelY} ${toX},${channelY} ${toX},${toY}`,
-      labelX: (fromX + toX) / 2,
-      labelY: topChannel ? channelY - 8 : channelY + 16,
-    };
-  }
-  const outsideX = Math.max(from.x + from.width, to.x + to.width) + 22 + transitionIndex * 12;
-  const fromY = from.y + from.summaryHeight / 2;
-  const toY = to.y + to.summaryHeight / 2;
+  const targetOffset = (lane - (layout.returnLanes.size - 1) / 2) * 22;
+  const toX = to.x + to.width / 2 + targetOffset;
+  const channelY = layout.returnTrackTop + lane * layout.returnTrackGap;
+  const label = `返工 ${transition.from} ${transition.fromResult} → ${transition.to} · #${String(transition.fromSequence).padStart(2, "0")}→#${String(transition.toSequence).padStart(2, "0")}`;
+  const labelWidth = Math.max(188, Math.min(244, label.length * 7.4 + 30));
+  const labelX = Math.min((fromX + toX) / 2, toX + 220);
   return {
-    path: `M${from.x + from.width},${fromY} H${outsideX} V${toY} H${to.x + to.width}`,
-    labelX: outsideX - 8,
-    labelY: (fromY + toY) / 2 - 8,
+    path: `M${fromX},${from.y} V${channelY + 12} Q${fromX},${channelY} ${fromX - 12},${channelY} H${toX + 12} Q${toX},${channelY} ${toX},${channelY + 12} V${to.y}`,
+    label,
+    labelX,
+    labelY: channelY,
+    labelWidth,
+    sourceX: fromX,
+    sourceY: from.y,
   };
 }
 
@@ -809,8 +809,8 @@ function fitTimelineToViewport() {
   const camera = state.timelineCamera;
   camera.fitScale = TIMELINE_MIN_SCALE;
   camera.scale = TIMELINE_MIN_SCALE;
-  camera.x = (metrics.viewportWidth - metrics.width) / 2;
-  camera.y = (metrics.viewportHeight - metrics.height) / 2;
+  camera.x = metrics.width <= metrics.viewportWidth ? (metrics.viewportWidth - metrics.width) / 2 : 24;
+  camera.y = metrics.height <= metrics.viewportHeight ? (metrics.viewportHeight - metrics.height) / 2 : 24;
   camera.mode = "fit";
   applyTimelineCamera();
 }
@@ -908,7 +908,8 @@ function bindTimelineCamera() {
 function renderTimeline(task) {
   const events = detailEvents(task);
   state.selectedEvent = -1;
-  const layout = workflowLayout(events);
+  const reworkTransitions = workflowReworkTransitions(events);
+  const layout = workflowLayout(events, reworkTransitions);
   const stageGroups = STAGES.map((stage) => {
     const position = layout.positions.get(stage);
     const summary = summarizeStage(events, stage);
@@ -930,18 +931,21 @@ function renderTimeline(task) {
     const fromStage = STAGES[index];
     const from = layout.positions.get(fromStage);
     const to = layout.positions.get(stage);
-    return `<path class="workflow-route" d="${workflowMainRoute(from, to, layout)}" marker-end="url(#workflow-arrow)"/>`;
+    return `<path class="workflow-route" d="${workflowMainRoute(from, to)}" marker-end="url(#workflow-arrow)"/>`;
   }).join("");
-  const reworkRoutes = workflowReworkTransitions(events).map((transition, index) => {
-    const route = workflowReworkRoute(transition, index, layout);
-    return `<path class="workflow-route is-rework" d="${route.path}" marker-end="url(#workflow-return-arrow)"/><text class="workflow-return-label" x="${route.labelX}" y="${route.labelY}" text-anchor="middle">返工回 ${transition.to} · #${String(transition.fromSequence).padStart(2, "0")}→#${String(transition.toSequence).padStart(2, "0")}</text>`;
+  const reworkRoutes = reworkTransitions.map((transition) => {
+    const route = workflowReworkRoute(transition, layout);
+    return `<path class="workflow-route is-rework" d="${route.path}" marker-end="url(#workflow-return-arrow)"/><circle class="workflow-return-origin" cx="${route.sourceX}" cy="${route.sourceY}" r="4"/><g class="workflow-return-callout"><rect x="${route.labelX - route.labelWidth / 2}" y="${route.labelY - 14}" width="${route.labelWidth}" height="28" rx="6"/><text class="workflow-return-label" x="${route.labelX}" y="${route.labelY + 4}" text-anchor="middle">${escapeHtml(route.label)}</text></g>`;
   }).join("");
+  const reworkSummary = reworkTransitions.length
+    ? `<div class="workflow-return-band" aria-hidden="true"><span>返工回流</span><strong>${numberFormat.format(reworkTransitions.length)} 条</strong></div><ol class="sr-only" aria-label="返工回流记录">${reworkTransitions.map((transition) => `<li>${escapeHtml(`记录 ${String(transition.fromSequence).padStart(2, "0")} 从 ${transition.from} ${transition.fromResult} 返回 ${transition.to}，记录 ${String(transition.toSequence).padStart(2, "0")} 重新进入`)}</li>`).join("")}</ol>`
+    : "";
   elements.timelinePlane.dataset.width = String(layout.width);
   elements.timelinePlane.dataset.height = String(layout.height);
   elements.timelinePlane.style.width = `${layout.width}px`;
   elements.timelinePlane.style.height = `${layout.height}px`;
-  elements.timelinePlane.innerHTML = `<svg width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" aria-hidden="true"><defs><marker id="workflow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"/></marker><marker id="workflow-return-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"/></marker></defs>${mainRoutes}${reworkRoutes}</svg>${stageGroups}`;
-  elements.timelineCaption.textContent = task.records.length ? `${events.length} 条 metrics.md 记录；100% 原生清晰度，拖动空白处或用方向键浏览，Ctrl/⌘ + 滚轮缩放，普通滚轮滚动页面` : `${events.length} 个阶段产物节点；100% 原生清晰度，拖动空白处或用方向键浏览，时间缺失时不推算时长`;
+  elements.timelinePlane.innerHTML = `${reworkSummary}<svg width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" aria-hidden="true"><defs><marker id="workflow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"/></marker><marker id="workflow-return-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"/></marker></defs>${mainRoutes}${reworkRoutes}</svg>${stageGroups}`;
+  elements.timelineCaption.textContent = task.records.length ? `${events.length} 条 metrics.md 记录；S1–S6 横向推进，红色轨道表示阶段回流；拖动浏览，Ctrl/⌘ + 滚轮缩放，普通滚轮滚动页面` : `${events.length} 个阶段产物节点；S1–S6 横向推进，拖动浏览，时间缺失时不推算时长`;
   scheduleTimelineCamera({ forceFit: true });
 }
 
