@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "workflow_version": "2.1",
+  "context_budgets": {
+    "entry_characters": 2500,
+    "stage_instruction_characters": 6000
+  },
+  "task_id": {
+    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+    "forbid_double_dot": true,
+    "forbid_trailing": [".", "-"],
+    "forbid_suffix_case_insensitive": [".lock"],
+    "windows_reserved_stems": ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"]
+  },
+  "metrics": {
+    "document": "work/<id>/metrics.md",
+    "collector": "workflow/codex_usage.py",
+    "auto_collect_on_record": true,
+    "codex_source": "token_count.info.last_token_usage",
+    "display_timezone": "UTC+08:00",
+    "target_repository_commit": "forbidden",
+    "unknown_token_value": "NOT_AVAILABLE"
+  },
+  "invariants": [
+    {
+      "id": "protect-user-work",
+      "text": "不得丢弃、覆盖或隐藏无法确认属于当前需求的用户修改。"
+    },
+    {
+      "id": "honest-verification",
+      "text": "验证结果必须如实记录；不得删测试、放宽断言或把 NOT_RUN 写成 PASS。"
+    },
+    {
+      "id": "scope-control",
+      "text": "只做需求范围内的改动；实质性扩大范围必须重新取得方案批准。"
+    },
+    {
+      "id": "production-boundary",
+      "text": "生产环境操作和不可逆数据操作不由本工作流自动执行。"
+    }
+  ],
+  "gates": {
+    "A": {
+      "trigger": "blocking_ambiguity",
+      "required": true
+    },
+    "B": {
+      "trigger": "risk_policy",
+      "required_for": ["R2", "R3"]
+    },
+    "C": {
+      "trigger": "merge_or_acceptance",
+      "required": true
+    }
+  },
+  "risk_levels": {
+    "R0": "文档、文案或测试资料，不改变运行行为",
+    "R1": "局部、可逆、已有测试覆盖的实现改动",
+    "R2": "公共 API、数据结构、权限、安全、多项目或显著架构改动",
+    "R3": "生产操作、不可逆数据变化或无法安全回滚的动作"
+  },
+  "stages": {
+    "S1": {
+      "name": "解析与影响面分析",
+      "instruction": "workflow/stages/S1/SKILL.md",
+      "inputs": ["prds/<id>.md"],
+      "outputs": ["work/<id>/analysis.md", "work/<id>/metrics.md"],
+      "allowed_next": ["S2"],
+      "policies": ["workflow/references/metrics.md"],
+      "references": ["workflow/references/task-id.md"]
+    },
+    "S2": {
+      "name": "技术方案",
+      "instruction": "workflow/stages/S2/SKILL.md",
+      "inputs": ["work/<id>/analysis.md"],
+      "outputs": ["work/<id>/plan.md", "work/<id>/metrics.md"],
+      "allowed_next": ["S1", "S3"],
+      "policies": ["workflow/references/metrics.md"],
+      "references": ["workflow/references/gates.md", "workflow/references/impact-visualization.md"]
+    },
+    "S3": {
+      "name": "实现",
+      "instruction": "workflow/stages/S3/SKILL.md",
+      "inputs": ["work/<id>/plan.md"],
+      "outputs": ["work/<id>/impl-log.md", "work/<id>/metrics.md"],
+      "allowed_next": ["S2", "S4"],
+      "policies": ["workflow/references/metrics.md"],
+      "references": ["workflow/references/git-safety.md", "workflow/references/worktrees.md"]
+    },
+    "S4": {
+      "name": "验证",
+      "instruction": "workflow/stages/S4/SKILL.md",
+      "inputs": ["work/<id>/analysis.md", "work/<id>/plan.md", "work/<id>/impl-log.md"],
+      "outputs": ["work/<id>/verify.md", "work/<id>/metrics.md"],
+      "allowed_next": ["S3", "S5"],
+      "policies": ["workflow/references/metrics.md"],
+      "references": ["workflow/references/verification-results.md"]
+    },
+    "S5": {
+      "name": "交付",
+      "instruction": "workflow/stages/S5/SKILL.md",
+      "inputs": ["work/<id>/verify.md"],
+      "outputs": ["work/<id>/delivery.md", "work/<id>/metrics.md"],
+      "allowed_next": ["S3", "S6"],
+      "policies": ["workflow/references/metrics.md"],
+      "references": ["workflow/references/gates.md", "workflow/references/git-safety.md"]
+    },
+    "S6": {
+      "name": "归档",
+      "instruction": "workflow/stages/S6/SKILL.md",
+      "inputs": ["work/<id>/delivery.md"],
+      "outputs": ["work/<id>/state.md", "work/<id>/metrics.md"],
+      "allowed_next": [],
+      "policies": ["workflow/references/metrics.md"],
+      "references": ["workflow/references/artifact-retention.md", "workflow/references/worktrees.md"]
+    }
+  }
+}

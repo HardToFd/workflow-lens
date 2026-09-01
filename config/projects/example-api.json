@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "name": "example-api",
+  "path": "example-api/",
+  "stack": ["TypeScript", "Node.js", "PostgreSQL"],
+  "conventions": ["CONTRIBUTING.md", "docs/api-style.md"],
+  "change_tracking": {
+    "required": true,
+    "document_path": "docs/changes/<id>.md",
+    "central_changelog": "docs/CHANGELOG.md"
+  },
+  "verification": [
+    "npm run lint",
+    "npm run typecheck",
+    "npm test"
+  ],
+  "advisory_verification": [],
+  "branch_model": {
+    "base": "origin/main",
+    "feature": "feature/<id>",
+    "delivery_target": "main"
+  },
+  "remote": {
+    "provider": "GitHub",
+    "create_command": "gh pr create",
+    "fallback": "patch_and_pr_description"
+  },
+  "extensions": [],
+  "approval_policy": {
+    "R0": "auto",
+    "R1": "gate_b",
+    "R2": "gate_b",
+    "R3": "gate_b"
+  },
+  "process_artifacts_in_repository": false
+}

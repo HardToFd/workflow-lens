@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <title>Workflow Lens · 本地效率仪表盘</title>
+  <link rel="stylesheet" href="/tokens.css">
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+  <div id="app-shell" class="app-shell" data-sidebar="expanded">
+    <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="关闭导航" tabindex="-1"></button>
+
+    <aside id="sidebar" class="sidebar" aria-label="主导航">
+      <div class="sidebar__brand">
+        <span class="brand-mark" aria-hidden="true">WL</span>
+        <span class="brand-copy"><strong>Workflow Lens</strong><small>LOCAL EVIDENCE</small></span>
+      </div>
+
+      <nav class="sidebar__nav" aria-label="仪表盘视图">
+        <button class="nav-item is-active" type="button" data-view-target="overview" aria-current="page">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 19V9m8 10V5m8 14v-7M2 19h20"/></svg>
+          <span class="nav-item__label">总览</span><kbd>1</kbd>
+        </button>
+        <button class="nav-item" type="button" data-view-target="analysis">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="12" cy="19" r="2"/><path d="m6.5 10.5 4-4m3 0 4 4m0 3-4 4m-3 0-4-4"/></svg>
+          <span class="nav-item__label">需求分析</span><kbd>2</kbd>
+        </button>
+      </nav>
+
+      <div class="sidebar__source">
+        <span class="source-pulse" aria-hidden="true"></span>
+        <span class="brand-copy"><strong id="source-state">连接本地数据</strong><small id="source-detail">STATE + METRICS</small></span>
+      </div>
+
+      <button id="sidebar-toggle" class="icon-button sidebar__toggle" type="button" aria-label="收起侧边栏" title="收起侧边栏">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 7-5 5 5 5"/></svg>
+      </button>
+    </aside>
+
+    <div class="workspace">
+      <header class="utility-bar">
+        <button id="mobile-menu" class="icon-button mobile-menu" type="button" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <div class="utility-context">
+          <span id="view-context">总览</span>
+          <strong id="context-title">效率与需求事件</strong>
+        </div>
+        <div class="utility-actions">
+          <button id="command-trigger" class="command-trigger" type="button" aria-haspopup="dialog" aria-controls="command-dialog">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
+            <span>搜索需求</span><kbd>Ctrl K</kbd>
+          </button>
+          <button id="refresh-button" class="icon-button" type="button" aria-label="刷新本地数据" title="刷新本地数据">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.1 6.1L4 8m2 7a7 7 0 0 0 11.9 2.9L20 16"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main id="main-content" class="main-content" tabindex="-1">
+        <div id="error-banner" class="error-banner" role="alert" hidden>
+          <span id="error-message">本地数据读取失败。</span>
+          <button id="error-retry" class="text-button" type="button">重新读取</button>
+        </div>
+
+        <section id="overview-view" class="view" aria-labelledby="overview-title">
+          <header class="dashboard-heading reveal" style="--i: 0">
+            <div>
+              <h1 id="overview-title">工作流总览</h1>
+              <p>本地需求、阶段度量与返工证据</p>
+            </div>
+            <div class="coverage-readout" aria-live="polite">
+              <span>度量覆盖</span>
+              <strong id="coverage-value">—</strong>
+              <small id="coverage-caption">正在读取</small>
+            </div>
+          </header>
+
+          <section class="metric-ledger reveal" style="--i: 1" aria-label="关键效率指标">
+            <article><span>过程效率比</span><strong id="metric-efficiency">—</strong><small id="metric-rework">返工 — 次</small></article>
+            <article><span>完成平均时长</span><strong id="metric-duration-average">—</strong><small id="metric-duration-range">最短 — · 最长 —</small></article>
+            <article><span>完成平均 Token</span><strong id="metric-token-average">—</strong><small id="metric-token-range">最低 — · 最高 —</small></article>
+            <article><span>需求事件</span><strong id="metric-total">—</strong><small id="metric-total-note">本地 PRD</small></article>
+          </section>
+
+          <section class="workbench-section workbench-section--gantt reveal" style="--i: 2" aria-labelledby="gantt-title">
+            <div class="workbench-heading">
+              <div><h2 id="gantt-title">并行需求时间轴</h2><p>多需求按泳道对齐；点击需求展开阶段与尝试明细</p></div>
+              <div class="gantt-legend" aria-label="甘特图结果图例">
+                <span><i class="legend-swatch legend-swatch--pass" aria-hidden="true"></i>通过</span>
+                <span><i class="legend-swatch legend-swatch--fail" aria-hidden="true"></i>失败 / 作废</span>
+                <span><i class="legend-swatch legend-swatch--blocked" aria-hidden="true"></i>阻塞</span>
+              </div>
+            </div>
+            <div class="gantt-workbench">
+              <div id="gantt-chart" class="gantt-chart"></div>
+            </div>
+            <details class="data-details"><summary>查看精确阶段数据</summary><div id="gantt-table" class="table-wrap"></div></details>
+          </section>
+
+          <div class="dashboard-band reveal" style="--i: 3">
+            <section class="dashboard-module dashboard-module--trend" aria-labelledby="trend-title">
+              <div class="workbench-heading"><div><h2 id="trend-title">需求进入趋势</h2><p id="trend-summary">按 PRD 日期累计</p></div></div>
+              <div id="trend-chart" class="chart-frame" aria-live="polite"></div>
+              <details class="data-details"><summary>查看趋势数据</summary><div id="trend-table" class="table-wrap"></div></details>
+            </section>
+
+            <section class="dashboard-module dashboard-module--status" aria-labelledby="status-title">
+              <div class="workbench-heading"><div><h2 id="status-title">需求状态</h2><p>归档、进行中、阻塞与作废</p></div></div>
+              <div id="status-chart" class="status-chart"></div>
+            </section>
+          </div>
+
+          <div class="diagnostic-band reveal" style="--i: 4">
+            <section class="dashboard-module" aria-labelledby="rework-title">
+              <div class="workbench-heading"><div><h2 id="rework-title">返工原因</h2><p>仅汇总已有失败或返工备注</p></div></div>
+              <div id="rework-list" class="rework-list"></div>
+            </section>
+
+            <section class="dashboard-module" aria-labelledby="stage-title">
+              <div class="workbench-heading"><div><h2 id="stage-title">当前阶段负载</h2><p>每个需求按当前环节计一次</p></div></div>
+              <div id="stage-chart" class="bar-list"></div>
+            </section>
+
+            <section class="dashboard-module" aria-labelledby="category-title">
+              <div class="workbench-heading"><div><h2 id="category-title">需求分类</h2><p>标题关键词本地归类，仅用于导航</p></div></div>
+              <div id="category-chart" class="bar-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="analysis-view" class="view" aria-labelledby="analysis-title" hidden>
+          <header class="analysis-heading">
+            <div><h1 id="analysis-title">需求复盘</h1><p>筛选需求，点击卡片，沿真实阶段记录下钻。</p></div>
+            <div class="analysis-heading__tools">
+              <span id="analysis-count" class="result-count" aria-live="polite">—</span>
+              <button id="demand-drawer-toggle" type="button" class="text-button drawer-toggle" aria-controls="demand-drawer" aria-expanded="true">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16M4 12h10M4 19h16"/></svg>
+                <span>需求抽屉</span>
+              </button>
+            </div>
+          </header>
+
+          <div id="analysis-layout" class="analysis-layout" data-drawer="open">
+            <button id="demand-drawer-scrim" type="button" class="demand-drawer-scrim" aria-label="关闭需求抽屉" hidden></button>
+            <aside id="demand-drawer" class="demand-browser demand-drawer" aria-label="需求筛选与列表">
+              <header class="demand-drawer__heading">
+                <div><h2>需求</h2><p>筛选并切换复盘对象</p></div>
+                <button id="demand-drawer-close" type="button" class="icon-button" aria-label="收起需求抽屉">
+                  <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg>
+                </button>
+              </header>
+              <div class="demand-drawer__body">
+                <div class="filter-stack">
+                  <label class="field"><span>搜索</span><input id="demand-search" type="search" placeholder="需求 id 或标题" autocomplete="off"><small id="search-help">输入后按本地数据筛选</small></label>
+                  <div class="filter-row">
+                    <label class="field"><span>时间</span><select id="time-filter"><option value="all">全部</option><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="90">近 90 天</option></select></label>
+                    <label class="field"><span>状态</span><select id="status-filter"><option value="all">全部</option><option value="active">进行中</option><option value="blocked">阻塞</option><option value="archived">已归档</option><option value="cancelled">已作废</option></select></label>
+                  </div>
+                  <label class="field"><span>排序</span><select id="sort-filter"><option value="updated-desc">最近更新</option><option value="updated-asc">最早更新</option><option value="status">按状态</option><option value="duration-desc">记录时长</option></select></label>
+                </div>
+                <div id="demand-list" class="demand-list" aria-live="polite"></div>
+              </div>
+            </aside>
+
+            <section id="demand-detail" class="demand-detail" aria-live="polite">
+              <div id="detail-empty" class="empty-state"><strong>选择一个需求</strong><p>时间线、返工回路和阶段证据会显示在这里。</p></div>
+              <div id="detail-content" hidden>
+                <header class="canvas-context">
+                  <div class="canvas-context__identity"><span id="detail-id" class="mono-meta"></span><h2 id="detail-title"></h2><div id="detail-badges" class="badge-row"></div></div>
+                  <div class="detail-kpis"><span><small>记录时长</small><strong id="detail-duration">—</strong></span><span><small>Token</small><strong id="detail-tokens">—</strong></span><span><small>效率</small><strong id="detail-efficiency">—</strong></span></div>
+                </header>
+
+                <section class="timeline-section" aria-labelledby="timeline-title">
+                  <div class="panel-heading timeline-heading"><div><h3 id="timeline-title">阶段工作流画布</h3><p id="timeline-caption">100% 原生清晰度；拖动空白处或用方向键浏览，点击节点打开详细证据</p></div><div class="canvas-tools" aria-label="画布缩放"><button type="button" class="icon-button" data-zoom="out" aria-label="缩小画布" title="缩小画布">−</button><button type="button" class="text-button" data-zoom="reset" aria-label="恢复 100% 并居中画布" title="恢复 100% 并居中画布">100%</button><button type="button" class="icon-button" data-zoom="in" aria-label="放大画布" title="放大画布">＋</button></div></div>
+                  <div id="timeline-viewport" class="timeline-viewport" tabindex="0" aria-label="可拖动、用方向键浏览和缩放的阶段工作流画布"><div id="timeline-scale"><div id="timeline-plane" class="timeline-plane"></div></div></div>
+                  <aside id="canvas-inspector" class="canvas-inspector" tabindex="-1" aria-labelledby="inspector-title" hidden>
+                    <header class="canvas-inspector__heading"><div><span>详细证据</span><h4 id="inspector-title">阶段详情</h4></div><button id="inspector-close" type="button" class="icon-button" aria-label="关闭详细证据"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button></header>
+                    <div id="event-detail" class="event-detail" aria-live="polite"></div>
+                  </aside>
+                </section>
+
+                <section id="metric-drilldown" class="metric-drilldown" aria-labelledby="metric-drilldown-title">
+                  <header class="panel-heading metric-drilldown__heading">
+                    <div><h3 id="metric-drilldown-title">详细指标下钻</h3><p id="metric-drilldown-caption">按当前需求的 metrics.md 汇总阶段投入、效率与回流。</p></div>
+                    <div class="metric-drilldown__actions"><span id="metric-drilldown-source" class="mono-meta">SOURCE · metrics.md</span><button type="button" class="text-button" data-metric-stage="all" aria-pressed="false">全部阶段</button></div>
+                  </header>
+                  <div id="metric-drilldown-kpis" class="metric-drilldown__kpis"></div>
+                  <div class="metric-drilldown__charts">
+                    <article class="metric-panel" aria-labelledby="token-composition-title">
+                      <header><div><h4 id="token-composition-title">Token 阶段构成</h4><p>按有精确 total 的尝试记录聚合；cached input 与 reasoning 不重复相加</p></div></header>
+                      <div id="token-composition-chart" class="token-composition-chart"></div>
+                    </article>
+                    <article class="metric-panel" aria-labelledby="duration-distribution-title">
+                      <header><div><h4 id="duration-distribution-title">阶段耗时分布</h4><p>按 metrics-start 至阶段退出的已记录墙钟时间聚合</p></div></header>
+                      <div id="duration-distribution-chart" class="duration-distribution-chart"></div>
+                    </article>
+                  </div>
+                  <section class="metric-stage-detail" aria-labelledby="metric-stage-detail-title">
+                    <header><div><span>阶段诊断</span><h4 id="metric-stage-detail-title">全部阶段</h4></div><p id="metric-stage-detail-caption"></p></header>
+                    <div id="metric-stage-detail-body"></div>
+                  </section>
+                  <div class="metric-table-wrap">
+                    <table class="metric-table">
+                      <caption>阶段指标明细；点击阶段名称切换上方诊断</caption>
+                      <thead><tr><th>阶段</th><th>尝试</th><th>最近结果</th><th>记录用时</th><th>Token</th><th>效率</th><th>返工</th></tr></thead>
+                      <tbody id="metric-stage-table"></tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <details class="evidence-section">
+                  <summary id="evidence-title" class="evidence-summary"><span>打开阶段原文</span><small>按需读取，不把缺失产物标记为通过</small></summary>
+                  <div class="evidence-section__body"><div id="artifact-tabs" class="artifact-tabs" role="toolbar" aria-label="阶段产物"></div><pre id="artifact-content" class="artifact-content" tabindex="0">选择一个现有产物。</pre></div>
+                </details>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <footer class="foot-line">
+          <p><strong>Workflow Lens</strong><span>只读本地证据</span><span id="last-updated">尚未同步</span><span>缺失值保持为 —</span></p>
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="command-dialog" class="command-dialog" aria-labelledby="command-title">
+    <form method="dialog" class="command-shell">
+      <div class="command-head"><label for="command-input" id="command-title">搜索需求或切换视图</label><button class="icon-button" value="cancel" aria-label="关闭搜索"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div>
+      <input id="command-input" type="search" placeholder="输入需求 id、标题或“总览”" autocomplete="off">
+      <div id="command-results" class="command-results" role="listbox" aria-label="搜索结果"></div>
+      <p class="command-hint"><kbd>↑</kbd><kbd>↓</kbd> 移动 <kbd>Enter</kbd> 打开 <kbd>Esc</kbd> 关闭</p>
+    </form>
+  </dialog>
+
+  <div id="live-region" class="sr-only" aria-live="polite"></div>
+</body>
+</html>

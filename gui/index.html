@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workflow Desk</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18221f;
+      --muted: #66716d;
+      --paper: #f4f2ec;
+      --panel: #fffefa;
+      --line: #dedbd1;
+      --accent: #0f766e;
+      --accent-soft: #d9efeb;
+      --warm: #e86a33;
+      --warm-soft: #fae7dc;
+      --danger: #b42318;
+      --shadow: 0 16px 40px rgba(36, 47, 43, .08);
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 5%, rgba(15, 118, 110, .09), transparent 26rem),
+        linear-gradient(135deg, #f7f5ef 0%, #f1efe9 100%);
+      font: 14px/1.55 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    button, input, textarea, select { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+      outline: 3px solid rgba(15, 118, 110, .24);
+      outline-offset: 2px;
+    }
+    .topbar {
+      height: 72px;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(222, 219, 209, .9);
+      background: rgba(255, 254, 250, .78);
+      backdrop-filter: blur(18px);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-mark {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      color: white;
+      background: var(--ink);
+      border-radius: 12px;
+      font-weight: 800;
+      letter-spacing: -.04em;
+      box-shadow: 0 8px 18px rgba(24, 34, 31, .2);
+    }
+    .brand-name { font-weight: 760; letter-spacing: -.02em; }
+    .brand-sub { color: var(--muted); font-size: 12px; }
+    .top-actions { display: flex; align-items: center; gap: 10px; }
+    .button {
+      border: 1px solid var(--line);
+      color: var(--ink);
+      background: var(--panel);
+      border-radius: 11px;
+      padding: 9px 13px;
+      font-weight: 650;
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }
+    .button:hover { transform: translateY(-1px); border-color: #bcb8ad; }
+    .button.primary { color: white; border-color: var(--ink); background: var(--ink); }
+    .button.accent { color: white; border-color: var(--accent); background: var(--accent); }
+    .button.small { padding: 6px 9px; font-size: 12px; }
+    .button:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+    .layout {
+      min-height: calc(100vh - 72px);
+      display: grid;
+      grid-template-columns: 280px minmax(480px, 1fr) 320px;
+    }
+    .sidebar, .inspector { padding: 22px 18px; }
+    .sidebar { border-right: 1px solid var(--line); }
+    .inspector { border-left: 1px solid var(--line); }
+    .sidebar-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    .eyebrow { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .search {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: rgba(255, 254, 250, .72);
+      border-radius: 12px;
+      padding: 10px 12px;
+      color: var(--ink);
+      margin-bottom: 14px;
+    }
+    .task-list { display: grid; gap: 8px; }
+    .task-item {
+      width: 100%;
+      text-align: left;
+      border: 1px solid transparent;
+      border-radius: 14px;
+      padding: 12px;
+      background: transparent;
+      color: inherit;
+    }
+    .task-item:hover { background: rgba(255, 254, 250, .72); }
+    .task-item.active { border-color: var(--line); background: var(--panel); box-shadow: 0 8px 22px rgba(36, 47, 43, .06); }
+    .task-title { display: block; font-weight: 720; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .task-meta { display: flex; justify-content: space-between; gap: 8px; margin-top: 7px; color: var(--muted); font-size: 12px; }
+    .status-dot { width: 7px; height: 7px; display: inline-block; margin-right: 6px; border-radius: 50%; background: var(--accent); }
+    .main { padding: 30px; min-width: 0; }
+    .empty {
+      min-height: 62vh;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      color: var(--muted);
+    }
+    .empty-card { max-width: 420px; }
+    .empty-card h2 { color: var(--ink); font-size: 28px; margin: 0 0 8px; }
+    .task-view[hidden], .empty[hidden], .field[hidden] { display: none; }
+    .hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 26px; }
+    .hero h1 { margin: 4px 0 8px; font-size: clamp(26px, 4vw, 42px); line-height: 1.12; letter-spacing: -.045em; }
+    .task-id { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 5px 9px; font-size: 12px; font-weight: 720; background: #eceae3; }
+    .badge.phase { color: #075d56; background: var(--accent-soft); }
+    .badge.blocked { color: var(--danger); background: #fee4e2; }
+    .stage-rail {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 5px;
+      margin-bottom: 24px;
+    }
+    .stage {
+      min-width: 0;
+      padding: 10px 7px;
+      text-align: center;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 254, 250, .55);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .stage.done { color: var(--accent); border-color: #a8d4cd; background: var(--accent-soft); }
+    .stage.current { color: white; border-color: var(--ink); background: var(--ink); box-shadow: 0 8px 18px rgba(24, 34, 31, .14); }
+    .section { margin-top: 22px; }
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+    .section h2 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+    .card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); overflow: hidden; }
+    .project-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid #ebe8df; white-space: nowrap; }
+    th { color: var(--muted); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; background: #faf8f3; }
+    tr:last-child td { border-bottom: 0; }
+    .artifact-tabs { display: flex; flex-wrap: wrap; gap: 7px; }
+    .artifact-tab {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: transparent;
+      color: var(--muted);
+      padding: 6px 10px;
+      font-size: 12px;
+    }
+    .artifact-tab.active { color: white; background: var(--accent); border-color: var(--accent); }
+    .artifact-tab:disabled { opacity: .36; cursor: not-allowed; }
+    .document {
+      min-height: 350px;
+      max-height: 62vh;
+      overflow: auto;
+      margin: 0;
+      padding: 22px;
+      color: #27322f;
+      background: #fffefa;
+      font: 13px/1.75 ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .panel { margin-bottom: 18px; padding: 16px; border: 1px solid var(--line); border-radius: 15px; background: rgba(255, 254, 250, .78); }
+    .panel h2 { margin: 0 0 12px; font-size: 14px; }
+    .panel p { color: var(--muted); margin: 0 0 12px; }
+    .action-list { display: grid; gap: 8px; }
+    .action-button { width: 100%; text-align: left; color: #75401f; border: 1px solid #efc6ad; border-radius: 11px; padding: 9px 10px; background: var(--warm-soft); font-weight: 700; }
+    .prompt-box { display: flex; gap: 8px; }
+    .prompt-box code { flex: 1; min-width: 0; padding: 8px; border-radius: 9px; background: #eceae3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mini-log { max-height: 180px; overflow: auto; margin: 0; color: var(--muted); font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .log-item { padding: 8px 0; border-bottom: 1px solid var(--line); }
+    .log-item:last-child { border: 0; }
+    dialog { width: min(560px, calc(100vw - 28px)); border: 0; border-radius: 20px; padding: 0; color: var(--ink); background: var(--panel); box-shadow: 0 28px 90px rgba(24, 34, 31, .26); }
+    dialog::backdrop { background: rgba(24, 34, 31, .42); backdrop-filter: blur(3px); }
+    .dialog-body { padding: 22px; }
+    .dialog-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+    .dialog-head h2 { margin: 0; font-size: 21px; }
+    .icon-button { border: 0; color: var(--muted); background: transparent; font-size: 22px; line-height: 1; }
+    .form-grid { display: grid; gap: 14px; }
+    .field label { display: block; margin-bottom: 6px; font-weight: 700; }
+    .field small { color: var(--muted); }
+    .field input, .field textarea, .field select { width: 100%; border: 1px solid var(--line); border-radius: 11px; padding: 10px 11px; color: var(--ink); background: white; }
+    .field textarea { min-height: 82px; resize: vertical; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 18px; }
+    .toast { position: fixed; right: 20px; bottom: 20px; max-width: 420px; padding: 12px 15px; color: white; background: var(--ink); border-radius: 12px; box-shadow: var(--shadow); opacity: 0; transform: translateY(10px); pointer-events: none; transition: .2s ease; z-index: 30; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.error { background: var(--danger); }
+    .connection { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+    .connection::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #98a29e; }
+    .connection.ok::before { background: #12a594; box-shadow: 0 0 0 4px rgba(18, 165, 148, .1); }
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 240px minmax(0, 1fr); }
+      .inspector { grid-column: 1 / -1; border: 1px solid var(--line); display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+      .inspector .panel { margin: 0; }
+    }
+    @media (max-width: 760px) {
+      .topbar { height: auto; min-height: 66px; padding: 12px 14px; }
+      .brand-sub, .desktop-only { display: none; }
+      .layout { display: block; }
+      .sidebar { border: 0; padding: 15px 14px 0; }
+      .task-list { display: flex; overflow-x: auto; padding-bottom: 8px; }
+      .task-item { min-width: 220px; }
+      .main { padding: 22px 14px; }
+      .hero { display: block; }
+      .stage-rail { overflow-x: auto; grid-template-columns: repeat(6, 88px); }
+      .section-head { align-items: flex-start; flex-direction: column; }
+      .artifact-tabs { width: 100%; }
+      .inspector { display: block; margin: 0 14px 20px; padding: 0; border: 0; }
+      .inspector .panel { margin-bottom: 12px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">WF</div>
+      <div><div class="brand-name">Workflow Desk</div><div class="brand-sub">Markdown 工作流操作台</div></div>
+    </div>
+    <div class="top-actions">
+      <span id="connection" class="connection">连接中</span>
+      <button id="refresh" class="button desktop-only" type="button">刷新</button>
+      <button id="new-task" class="button primary" type="button">新建需求</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" aria-label="需求列表">
+      <div class="sidebar-head"><span class="eyebrow">需求</span><span id="task-count" class="count">0</span></div>
+      <input id="search" class="search" type="search" placeholder="搜索需求 / 按 / 聚焦" aria-label="搜索需求">
+      <div id="task-list" class="task-list"></div>
+    </aside>
+
+    <main class="main">
+      <div id="empty" class="empty"><div class="empty-card"><span class="eyebrow">本地 · 可恢复 · 可审计</span><h2>从一个需求开始</h2><p>创建 PRD，或从左侧选择已有任务。所有内容仍保存在工作区 Markdown 文件中。</p></div></div>
+      <div id="task-view" class="task-view" hidden>
+        <section class="hero">
+          <div><span class="eyebrow">当前需求</span><h1 id="title"></h1><div id="task-id" class="task-id"></div><div id="badges" class="badges"></div></div>
+        </section>
+        <div id="stage-rail" class="stage-rail" aria-label="工作流阶段"></div>
+
+        <section class="section">
+          <div class="section-head"><h2>项目状态</h2><span id="project-count" class="count"></span></div>
+          <div class="card project-wrap"><table><thead><tr><th>项目</th><th>阶段</th><th>分支</th><th>验证</th><th>闸口 C</th><th>状态</th></tr></thead><tbody id="projects"></tbody></table></div>
+        </section>
+
+        <section class="section">
+          <div class="section-head"><h2 id="artifact-title">产物</h2><div id="artifact-tabs" class="artifact-tabs"></div></div>
+          <div class="card"><pre id="document" class="document">选择一个产物</pre></div>
+        </section>
+      </div>
+    </main>
+
+    <aside class="inspector" aria-label="任务操作">
+      <section class="panel"><h2>待人工动作</h2><div id="actions" class="action-list"><p>选择需求后显示。</p></div></section>
+      <section class="panel"><h2>继续执行</h2><p>复制提示词到任意本地 AI 代理。</p><div class="prompt-box"><code id="run-prompt">选择需求</code><button id="copy-prompt" class="button small" type="button">复制</button></div></section>
+      <section class="panel"><h2>Git 状态</h2><pre id="git-status" class="mini-log">读取中…</pre></section>
+      <section class="panel"><h2>本次操作日志</h2><div id="logs" class="mini-log">暂无写操作</div></section>
+    </aside>
+  </div>
+
+  <dialog id="new-dialog">
+    <form id="new-form" class="dialog-body">
+      <div class="dialog-head"><h2>新建需求</h2><button class="icon-button" type="button" data-close="new-dialog" aria-label="关闭">×</button></div>
+      <div class="form-grid">
+        <div class="field"><label for="new-id">需求 id</label><input id="new-id" name="id" required maxlength="64" placeholder="feature-name"><small>仅字母、数字、点、下划线和短横线。</small></div>
+        <div class="field"><label for="new-title">标题</label><input id="new-title" name="title" required maxlength="120" placeholder="需求标题"></div>
+        <div class="field"><label for="new-background">背景</label><textarea id="new-background" name="background" placeholder="为什么要做"></textarea></div>
+        <div class="field"><label for="new-description">功能描述</label><textarea id="new-description" name="description" required placeholder="做什么"></textarea></div>
+        <div class="field"><label for="new-acceptance">验收标准</label><textarea id="new-acceptance" name="acceptance" required placeholder="每行一条"></textarea></div>
+        <div class="field"><label for="new-out">范围外</label><textarea id="new-out" name="out_of_scope" placeholder="每行一条"></textarea></div>
+      </div>
+      <div class="dialog-actions"><button class="button" type="button" data-close="new-dialog">取消</button><button class="button accent" type="submit">创建 PRD</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="gate-dialog">
+    <form id="gate-form" class="dialog-body">
+      <div class="dialog-head"><h2 id="gate-title">确认闸口</h2><button class="icon-button" type="button" data-close="gate-dialog" aria-label="关闭">×</button></div>
+      <p id="gate-context"></p>
+      <div id="gate-result-field" class="field" hidden><label for="gate-result">确认结果</label><select id="gate-result"></select></div>
+      <div class="field"><label for="gate-quote">人工原话</label><textarea id="gate-quote" required placeholder="这段原话会写入过程产物"></textarea></div>
+      <div class="dialog-actions"><button class="button" type="button" data-close="gate-dialog">取消</button><button class="button accent" type="submit">确认写入</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const state = { tasks: [], current: null, artifact: null, gateAction: null };
+    const $ = (selector) => document.querySelector(selector);
+    const escapeHtml = (value = "") => String(value).replace(/[&<>'"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[ch]));
+
+    async function api(path, options = {}) {
+      const init = { ...options, headers: { ...(options.headers || {}) } };
+      if (init.body) {
+        init.headers["Content-Type"] = "application/json";
+        init.headers["X-Requested-With"] = "workflow-gui";
+      }
+      const response = await fetch(path, init);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `请求失败 (${response.status})`);
+      return payload;
+    }
+
+    function toast(message, error = false) {
+      const node = $("#toast");
+      node.textContent = message;
+      node.className = `toast show${error ? " error" : ""}`;
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(() => node.className = "toast", 2600);
+    }
+
+    function renderTaskList() {
+      const query = $("#search").value.trim().toLowerCase();
+      const visible = state.tasks.filter(task => `${task.id} ${task.title}`.toLowerCase().includes(query));
+      $("#task-count").textContent = String(visible.length);
+      $("#task-list").innerHTML = visible.map(task => `
+        <button class="task-item ${state.current?.id === task.id ? "active" : ""}" data-task="${escapeHtml(task.id)}" type="button">
+          <span class="task-title">${escapeHtml(task.title)}</span>
+          <span class="task-meta"><span><i class="status-dot"></i>${escapeHtml(task.phase)}</span><span>${escapeHtml(task.status)}</span></span>
+        </button>`).join("") || `<p class="count">没有匹配的需求</p>`;
+      document.querySelectorAll("[data-task]").forEach(button => button.addEventListener("click", () => selectTask(button.dataset.task)));
+    }
+
+    async function loadTasks(preferredId) {
+      const payload = await api("/api/tasks");
+      state.tasks = payload.tasks;
+      renderTaskList();
+      const nextId = preferredId || state.current?.id || state.tasks[0]?.id;
+      if (nextId && state.tasks.some(task => task.id === nextId)) await selectTask(nextId);
+      else showEmpty();
+    }
+
+    function showEmpty() {
+      state.current = null;
+      $("#empty").hidden = false;
+      $("#task-view").hidden = true;
+      $("#actions").innerHTML = "<p>选择需求后显示。</p>";
+      $("#run-prompt").textContent = "选择需求";
+      renderTaskList();
+    }
+
+    async function selectTask(id) {
+      state.current = await api(`/api/tasks/${encodeURIComponent(id)}`);
+      renderTaskList();
+      renderCurrent();
+      const first = state.current.artifacts.find(item => item.exists && item.name === "state.md") || state.current.artifacts.find(item => item.exists);
+      if (first) await loadArtifact(first.name); else $("#document").textContent = "尚无产物";
+    }
+
+    function renderCurrent() {
+      const task = state.current;
+      $("#empty").hidden = true;
+      $("#task-view").hidden = false;
+      $("#title").textContent = task.title;
+      $("#task-id").textContent = task.id;
+      const phase = task.top.phase || "未开始";
+      const status = task.top.status || "仅有 PRD";
+      $("#badges").innerHTML = `<span class="badge phase">${escapeHtml(phase)}</span><span class="badge ${status.includes("BLOCKED") ? "blocked" : ""}">${escapeHtml(status)}</span>`;
+      const currentNumber = Number((phase.match(/^S([1-6])$/) || [0, 0])[1]);
+      $("#stage-rail").innerHTML = [1,2,3,4,5,6].map(number => `<div class="stage ${number < currentNumber ? "done" : ""} ${number === currentNumber ? "current" : ""}">S${number}</div>`).join("");
+      $("#project-count").textContent = `${task.projects.length} 个项目`;
+      $("#projects").innerHTML = task.projects.map(project => `<tr><td><strong>${escapeHtml(project.project)}</strong></td><td>${escapeHtml(project.phase)}</td><td><code>${escapeHtml(project.branch)}</code></td><td>${escapeHtml(project.test_status || "-")}</td><td>${escapeHtml(project.gate_c)}</td><td>${escapeHtml(project.row_status)}</td></tr>`).join("") || `<tr><td colspan="6" class="count">尚未初始化项目状态表</td></tr>`;
+      $("#artifact-tabs").innerHTML = task.artifacts.map(item => `<button class="artifact-tab" data-artifact="${escapeHtml(item.name)}" type="button" ${item.exists ? "" : "disabled"}>${escapeHtml(item.label)}</button>`).join("");
+      document.querySelectorAll("[data-artifact]").forEach(button => button.addEventListener("click", () => loadArtifact(button.dataset.artifact)));
+      $("#run-prompt").textContent = task.run_prompt;
+      renderActions();
+    }
+
+    async function loadArtifact(name) {
+      if (!state.current) return;
+      const artifact = await api(`/api/tasks/${encodeURIComponent(state.current.id)}/artifacts/${encodeURIComponent(name)}`);
+      state.artifact = name;
+      $("#artifact-title").textContent = artifact.label;
+      $("#document").textContent = artifact.content;
+      document.querySelectorAll("[data-artifact]").forEach(button => button.classList.toggle("active", button.dataset.artifact === name));
+    }
+
+    function renderActions() {
+      const node = $("#actions");
+      node.innerHTML = "";
+      if (!state.current.actions.length) {
+        node.innerHTML = `<p>当前没有等待中的人工闸口。</p>`;
+        return;
+      }
+      state.current.actions.forEach(action => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "action-button";
+        button.textContent = action.project ? `${action.label} · ${action.project}` : action.label;
+        button.addEventListener("click", () => openGate(action));
+        node.appendChild(button);
+      });
+    }
+
+    function openGate(action) {
+      state.gateAction = action;
+      $("#gate-title").textContent = action.label;
+      $("#gate-context").textContent = action.project ? `项目：${action.project}` : `需求：${state.current.id}`;
+      const resultField = $("#gate-result-field");
+      resultField.hidden = !action.results;
+      $("#gate-result").innerHTML = (action.results || []).map(result => `<option>${escapeHtml(result)}</option>`).join("");
+      $("#gate-quote").value = "";
+      $("#gate-dialog").showModal();
+    }
+
+    async function loadGit() {
+      try {
+        const git = await api("/api/git");
+        $("#git-status").textContent = git.output || "工作区干净";
+      } catch (error) { $("#git-status").textContent = error.message; }
+    }
+
+    async function loadLogs() {
+      try {
+        const { logs } = await api("/api/logs");
+        $("#logs").innerHTML = logs.length ? logs.map(log => `<div class="log-item"><strong>${escapeHtml(log.action)}</strong> · ${escapeHtml(log.task_id)}<br>${escapeHtml(log.detail)}<br>${escapeHtml(log.time)}</div>`).join("") : "暂无写操作";
+      } catch (error) { $("#logs").textContent = error.message; }
+    }
+
+    async function refreshAll() {
+      try {
+        await api("/api/health");
+        $("#connection").textContent = "本机已连接";
+        $("#connection").classList.add("ok");
+        await Promise.all([loadTasks(), loadGit(), loadLogs()]);
+      } catch (error) {
+        $("#connection").textContent = "连接失败";
+        $("#connection").classList.remove("ok");
+        toast(error.message, true);
+      }
+    }
+
+    $("#new-task").addEventListener("click", () => $("#new-dialog").showModal());
+    $("#refresh").addEventListener("click", refreshAll);
+    $("#search").addEventListener("input", renderTaskList);
+    $("#copy-prompt").addEventListener("click", async () => {
+      if (!state.current) return toast("请先选择需求", true);
+      try {
+        await navigator.clipboard.writeText(state.current.run_prompt);
+        toast("提示词已复制");
+      } catch (error) { toast("浏览器未允许写入剪贴板", true); }
+    });
+    document.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => $("#" + button.dataset.close).close()));
+
+    $("#new-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      const payload = Object.fromEntries(form.entries());
+      try {
+        await api("/api/tasks", { method: "POST", body: JSON.stringify(payload) });
+        $("#new-dialog").close();
+        event.currentTarget.reset();
+        toast("PRD 已创建");
+        await Promise.all([loadTasks(payload.id), loadLogs(), loadGit()]);
+      } catch (error) { toast(error.message, true); }
+    });
+
+    $("#gate-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      const action = state.gateAction;
+      const payload = { gate: action.gate, quote: $("#gate-quote").value };
+      if (action.project) { payload.project = action.project; payload.result = $("#gate-result").value; }
+      try {
+        await api(`/api/tasks/${encodeURIComponent(state.current.id)}/gates`, { method: "POST", body: JSON.stringify(payload) });
+        $("#gate-dialog").close();
+        toast("闸口答复已写入");
+        await Promise.all([selectTask(state.current.id), loadLogs(), loadGit()]);
+      } catch (error) { toast(error.message, true); }
+    });
+
+    window.addEventListener("keydown", event => {
+      const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+      if (event.key === "/" && !typing) { event.preventDefault(); $("#search").focus(); }
+      if (event.key.toLowerCase() === "n" && !typing) $("#new-dialog").showModal();
+    });
+
+    refreshAll();
+    setInterval(() => Promise.all([loadGit(), loadLogs()]), 15000);
+  </script>
+</body>
+</html>

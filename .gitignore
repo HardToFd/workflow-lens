@@ -1,0 +1,10 @@
+work/*
+!work/.gitkeep
+prds/*
+!prds/TEMPLATE.md
+/projects/
+.codex/
+.claude/settings.local.json
+dist/
+__pycache__/
+*.py[cod]

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "projects": [
+    {
+      "name": "example-api",
+      "path": "example-api/",
+      "signals": ["后端接口", "数据模型", "定时任务"],
+      "detail": "config/projects/example-api.json"
+    }
+  ]
+}
