@@ -14,9 +14,11 @@
   },
   "metrics": {
     "document": "work/<id>/metrics.md",
-    "collector": "workflow/codex_usage.py",
+    "collector": "workflow/token_usage.py",
     "auto_collect_on_record": true,
     "codex_source": "token_count.info.last_token_usage",
+    "omp_source": "assistant usage and model_usage",
+    "runtime_priority": ["codex", "omp"],
     "display_timezone": "UTC+08:00",
     "target_repository_commit": "forbidden",
     "unknown_token_value": "NOT_AVAILABLE"

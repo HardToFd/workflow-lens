@@ -1,10 +1,18 @@
 import json
+import os
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from workflow.codex_usage import collect_codex_usage
+from workflow.token_usage import (
+    collect_codex_usage,
+    collect_omp_usage,
+    collect_runtime_usage,
+    discover_omp_session_files,
+)
 from workflow.core import STAGES, can_transition, validate_task_id
 from workflow.workflowctl import (
     backfill_stage_metrics,
@@ -37,6 +45,25 @@ def write_codex_log(codex_home, session_id, events):
                 }
             )
         )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def omp_usage(input_tokens, cached, cache_write, output, reasoning):
+    return {
+        "input": input_tokens,
+        "output": output,
+        "cacheRead": cached,
+        "cacheWrite": cache_write,
+        "totalTokens": input_tokens + cached + cache_write + output,
+        "reasoningTokens": reasoning,
+    }
+
+
+def write_omp_session(path, cwd, events):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"type": "session", "version": 3, "id": path.stem, "timestamp": events[0]["timestamp"], "cwd": str(cwd)})]
+    lines.extend(json.dumps(event) if not isinstance(event, str) else event for event in events)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -228,6 +255,259 @@ class WorkflowCoreTests(unittest.TestCase):
             self.assertIn("input=120, cached_input=80, output=30, reasoning=10, total=150", content)
             self.assertRegex(content, r"- 开始：`[^`]+\+08:00`")
             self.assertRegex(content, r"- 结束：`[^`]+\+08:00`")
+
+    def test_omp_usage_collects_main_model_and_nested_events_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            main = root / "sessions" / "project" / "session.jsonl"
+            nested = main.with_suffix("") / "child.jsonl"
+            main_usage = omp_usage(100, 50, 10, 20, 5)
+            side_usage = omp_usage(10, 5, 2, 3, 1)
+            child_usage = omp_usage(10, 4, 1, 2, 2)
+            write_omp_session(
+                main,
+                root,
+                [
+                    {
+                        "type": "message",
+                        "id": "before",
+                        "timestamp": "2026-08-31T00:00:00Z",
+                        "message": {"role": "assistant", "usage": omp_usage(99, 0, 0, 1, 0)},
+                    },
+                    {
+                        "type": "message",
+                        "id": "main",
+                        "timestamp": "2026-08-31T00:01:00Z",
+                        "message": {"role": "assistant", "usage": main_usage},
+                    },
+                    {
+                        "type": "message",
+                        "id": "main",
+                        "timestamp": "2026-08-31T00:01:01Z",
+                        "message": {"role": "assistant", "usage": main_usage},
+                    },
+                    {
+                        "type": "model_usage",
+                        "id": "side",
+                        "timestamp": "2026-08-31T00:02:00Z",
+                        "usage": side_usage,
+                    },
+                    {
+                        "type": "model_usage",
+                        "id": "zero",
+                        "timestamp": "2026-08-31T00:02:10Z",
+                        "usage": omp_usage(0, 0, 0, 0, 0),
+                    },
+                    {
+                        "type": "model_usage",
+                        "id": "invalid",
+                        "timestamp": "2026-08-31T00:02:20Z",
+                        "usage": dict(side_usage, totalTokens=999),
+                    },
+                    '{"type":"model_usage","id":"broken","timestamp":"2026-08-31T00:02:30Z","usage":',
+                ],
+            )
+            write_omp_session(
+                nested,
+                root,
+                [
+                    {
+                        "type": "message",
+                        "id": "child",
+                        "timestamp": "2026-08-31T00:03:00Z",
+                        "message": {"role": "assistant", "usage": child_usage},
+                    }
+                ],
+            )
+
+            collected = collect_omp_usage(
+                "2026-08-31T00:01:00Z",
+                "2026-08-31T00:03:00Z",
+                [main],
+            )
+
+            self.assertTrue(collected["available"], collected)
+            self.assertEqual(collected["event_count"], 3)
+            self.assertEqual(collected["transcript_count"], 2)
+            self.assertEqual(collected["input_tokens"], 192)
+            self.assertEqual(collected["cached_input_tokens"], 59)
+            self.assertEqual(collected["output_tokens"], 25)
+            self.assertEqual(collected["reasoning_tokens"], 8)
+            self.assertEqual(collected["total_tokens"], 217)
+
+    def test_omp_discovery_uses_command_hint_to_isolate_parallel_tool_sessions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            agent_dir = root / "agent"
+            session_dir = agent_dir / "sessions" / "fixture"
+            now = time.time()
+            current_timestamp = datetime.fromtimestamp(now - 2, timezone.utc).isoformat().replace("+00:00", "Z")
+            parallel_timestamp = datetime.fromtimestamp(now - 1, timezone.utc).isoformat().replace("+00:00", "Z")
+            current = write_omp_session(
+                session_dir / "current.jsonl",
+                root,
+                [
+                    {
+                        "type": "custom",
+                        "customType": "tool_execution_start",
+                        "id": "tool-current",
+                        "timestamp": current_timestamp,
+                        "data": {
+                            "toolName": "bash",
+                            "startedAt": current_timestamp,
+                            "args": {"command": "python workflow/workflowctl.py metrics-record PRD-current"},
+                        },
+                    },
+                    {
+                        "type": "custom",
+                        "customType": "tool_execution_start",
+                        "id": "tool-later-same-session",
+                        "timestamp": parallel_timestamp,
+                        "data": {
+                            "toolName": "bash",
+                            "startedAt": parallel_timestamp,
+                            "args": {"command": "python workflow/workflowctl.py doctor"},
+                        },
+                    },
+                ],
+            )
+            parallel = write_omp_session(
+                session_dir / "parallel.jsonl",
+                root,
+                [{
+                    "type": "custom",
+                    "customType": "tool_execution_start",
+                    "id": "tool-parallel",
+                    "timestamp": parallel_timestamp,
+                    "data": {
+                        "toolName": "bash",
+                        "startedAt": parallel_timestamp,
+                        "args": {"command": "python workflow/workflowctl.py metrics-record PRD-parallel"},
+                    },
+                }],
+            )
+            os.utime(current, (now - 2, now - 2))
+            os.utime(parallel, (now - 1, now - 1))
+
+            ambiguous = discover_omp_session_files(
+                {"OMPCODE": "1"},
+                cwd=root,
+                omp_agent_dir=agent_dir,
+                now=now,
+            )
+            discovered = discover_omp_session_files(
+                {"OMPCODE": "1"},
+                cwd=root,
+                omp_agent_dir=agent_dir,
+                now=now,
+                command_hints=["metrics-record", "PRD-current"],
+            )
+
+            self.assertFalse(ambiguous["available"], ambiguous)
+            self.assertIn("ambiguous", ambiguous["reason"])
+            self.assertTrue(discovered["available"], discovered)
+            self.assertEqual(discovered["files"], [str(current.resolve())])
+            self.assertEqual(discovered["source"], "OMP current command session")
+
+    def test_runtime_usage_prefers_codex_without_reading_omp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            codex_home = root / ".codex"
+            session_id = "01a00000-0000-7000-8000-000000000003"
+            usage = {
+                "input_tokens": 50,
+                "cached_input_tokens": 20,
+                "output_tokens": 10,
+                "reasoning_output_tokens": 4,
+                "total_tokens": 60,
+            }
+            write_codex_log(codex_home, session_id, [("2026-08-31T00:01:00Z", usage, usage)])
+
+            collected = collect_runtime_usage(
+                "2026-08-31T00:00:00Z",
+                "2026-08-31T00:02:00Z",
+                [session_id],
+                codex_home,
+                omp_agent_dir=root / "missing-omp",
+                environ={"OMPCODE": "1"},
+            )
+
+            self.assertTrue(collected["available"], collected)
+            self.assertEqual(collected["runtime"], "codex")
+            self.assertEqual(collected["total_tokens"], 60)
+
+    def test_metrics_record_and_backfill_accept_omp_session(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            started_at = (now - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+            event_time = (now - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+            main = write_omp_session(
+                root / "omp-session.jsonl",
+                root,
+                [{"type": "message", "id": "live", "timestamp": event_time, "message": {"role": "assistant", "usage": omp_usage(40, 30, 5, 10, 3)}}],
+            )
+            (root / "work" / "live").mkdir(parents=True)
+            start_stage_metrics("live", root, "S1", started_at)
+            with patch.dict(os.environ, {"CODEX_SESSION_ID": "01a00000-0000-7000-8000-000000000004"}):
+                result = record_stage_metrics(
+                    "live",
+                    root,
+                    "S1",
+                    "PASS",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                    1,
+                    0,
+                    "omp",
+                    True,
+                    None,
+                    None,
+                    [str(main)],
+                )
+            self.assertEqual(result["tokens"]["total_tokens"], 85)
+            self.assertIn("OMP session usage", result["token_source"])
+
+            metrics = root / "work" / "history" / "metrics.md"
+            metrics.parent.mkdir(parents=True)
+            metrics.write_text(
+                "# metrics\n\n"
+                "## S1 · 尝试 1\n\n"
+                "- 结果：`PASS`\n"
+                "- 开始：`{}`\n"
+                "- 结束：`{}`\n"
+                "- Token 来源：`NOT_AVAILABLE`\n"
+                "- Token：`NOT_AVAILABLE`\n".format(started_at, now.isoformat().replace("+00:00", "Z")),
+                encoding="utf-8",
+            )
+            before = metrics.read_bytes()
+            with patch.dict(os.environ, {"CODEX_SESSION_ID": "01a00000-0000-7000-8000-000000000004"}):
+                preview = backfill_stage_metrics(
+                    "history",
+                    root,
+                    ["S1"],
+                    None,
+                    None,
+                    dry_run=True,
+                    omp_session_files=[str(main)],
+                )
+                self.assertEqual(preview["would_change"], 1)
+                self.assertEqual(metrics.read_bytes(), before)
+                actual = backfill_stage_metrics(
+                    "history",
+                    root,
+                    ["S1"],
+                    None,
+                    None,
+                    omp_session_files=[str(main)],
+                )
+            self.assertEqual(actual["changed"], 1)
+            self.assertIn("total=85", metrics.read_text(encoding="utf-8"))
 
     def test_legacy_markdown_state(self):
         with tempfile.TemporaryDirectory() as temp:

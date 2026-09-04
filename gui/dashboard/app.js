@@ -290,13 +290,14 @@ function parseMetrics(content) {
 function aggregateTask(task) {
   const records = task.records || [];
   const allDurations = records.length && records.every((record) => Number.isFinite(record.duration));
-  const allTokens = records.length && records.every((record) => Number.isFinite(record.tokenTotal));
+  const tokenRecords = records.filter((record) => Number.isFinite(record.tokenTotal));
   const acceptedUnits = records.reduce((sum, record) => sum + record.acceptedUnits, 0);
   const reworkUnits = records.reduce((sum, record) => sum + record.reworkUnits, 0);
   const denominator = acceptedUnits + reworkUnits;
   return {
     duration: allDurations ? records.reduce((sum, record) => sum + record.duration, 0) : null,
-    tokens: allTokens ? records.reduce((sum, record) => sum + record.tokenTotal, 0) : null,
+    tokens: tokenRecords.length ? tokenRecords.reduce((sum, record) => sum + record.tokenTotal, 0) : null,
+    tokenCoverage: tokenRecords.length,
     efficiency: denominator ? acceptedUnits / denominator : null,
     reworkCount: records.length ? Math.max(...records.map((record) => record.reworkCount)) : 0,
     acceptedUnits,
@@ -1181,7 +1182,8 @@ function renderDetail() {
   elements.detailBadges.innerHTML = `<span class="badge" data-tone="${task.statusMeta.key}">${escapeHtml(task.statusMeta.label)}</span><span class="badge">${escapeHtml(task.phase || "未开始")}</span><span class="badge">${escapeHtml(task.category)}</span>${task.loadError ? '<span class="badge" data-tone="cancelled">读取不完整</span>' : ""}`;
   elements.detailDuration.textContent = formatDuration(task.aggregate.duration);
   elements.detailTokens.textContent = formatTokens(task.aggregate.tokens);
-  elements.detailTokens.title = Number.isFinite(task.aggregate.tokens) ? numberFormat.format(task.aggregate.tokens) : "缺失";
+  const tokenCoverage = `${task.aggregate.tokenCoverage}/${task.records.length}`;
+  elements.detailTokens.title = Number.isFinite(task.aggregate.tokens) ? `${numberFormat.format(task.aggregate.tokens)}（精确记录 ${tokenCoverage}）` : "缺失";
   elements.detailEfficiency.textContent = formatPercent(task.aggregate.efficiency);
   hideInspector({ immediate: true });
   state.selectedEvent = -1;

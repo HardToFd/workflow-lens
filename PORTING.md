@@ -1,6 +1,6 @@
 # 移植指南(把本文件夹变成你的工作区)
 
-工作流核心只依赖 Python 标准库。移植 = 拷贝 + 注册项目 + 核对技能挂载 + 试跑。Codex 环境可从本机 session JSONL 自动采集精确 Token；其他 Agent 平台不受影响，可显式传值或保留 `NOT_AVAILABLE`。
+工作流核心只依赖 Python 标准库。移植 = 拷贝 + 注册项目 + 核对技能挂载 + 试跑。Codex 与 OMP 环境可从本机 session JSONL 自动采集精确 Token；OMP 数据目录可由 `PI_CODING_AGENT_DIR` 覆盖，其他 Agent 平台不受影响，可显式传值或保留 `NOT_AVAILABLE`。
 
 ## 一、拷贝
 
@@ -14,7 +14,7 @@
 1. **`config/projects/index.json` + `config/projects/<name>.json`**:删除 example-api 示例，登记轻量判定信号和项目详情。也可继续只维护兼容入口 `config/projects.md`，但不要让两套配置表达不同事实。
 2. **`skills/security-baseline.md`**:按你的技术栈补充"侧重"小节(通用部分已可用)，并确认它在 `config/skills.md` 的 S4 挂载行保持启用。
 
-影响面分享图仅在跨项目、复杂异步链路或人类明确要求时按需启用。外部 Agent Skill 适配器包含机器相关入口，必须在目标机器重新检测并加入编排，不能复制其他机器的绝对路径。
+Archify 与 Diagram Design 默认停用；仅在跨项目、复杂异步链路或人类明确要求分享图时按需启用。适配器包含当前机器的绝对入口路径，换机器后如需使用，应在 GUI“设置 → 技能挂载”中重新检测并加入编排，不能照搬失效路径。
 
 ## 三、按需改(可全部保持默认)
 
@@ -64,8 +64,7 @@ AGENTS.md                    通用入口(协议自引导)
 README.md / PORTING.md       人类文档
 EVALUATION.md                当前静态评估(非运行协议)
 CLAUDE.md  .claude/commands/ Claude Code 薄壳(prd-run 主入口)
-gui/        server.py desktop.py build.ps1 index.html          本地管理 GUI 与 Windows 单文件构建
-gui/dashboard*                                                 Workflow Lens 只读分析仪表盘
+gui/        server.py desktop.py build.ps1 index.html          本地 GUI与Windows单文件构建
 workflow/  manifest.json core.py workflowctl.py          机器定义、静态技能挂载、度量与上下文路由
 workflow/stages/S1..S6/SKILL.md                           按阶段加载的执行说明
 workflow/references/                                     Git、闸口、验证等按需参考
@@ -73,7 +72,7 @@ workflow/  protocol.md stages.md loops.md artifacts.md   兼容性深层参考
 workflow/extensions/  dual-baseline-test.md              流程扩展(按需启用)
 config/projects/index.json + <name>.json                 渐进式项目配置
 config/    capabilities.md projects.md skills.md         兼容配置层
-skills/    security-baseline.md                          预置通用安全技能
+skills/    security-baseline.md + imported-*.md          预置技能与外部适配器(3)
 prds/      TEMPLATE.md                                   PRD 模板
 work/      .gitkeep                                      过程产物区(空)
 ```

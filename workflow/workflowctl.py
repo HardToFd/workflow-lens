@@ -11,10 +11,20 @@ from typing import Any, Dict, List, Optional
 
 try:
     from .core import MANIFEST, STAGES, can_transition, stage_definition, validate_task_id
-    from .codex_usage import collect_codex_usage, current_codex_session_ids, default_codex_home
+    from .token_usage import (
+        collect_runtime_usage,
+        current_codex_session_ids,
+        current_omp_session_files,
+        default_codex_home,
+    )
 except ImportError:
     from core import MANIFEST, STAGES, can_transition, stage_definition, validate_task_id
-    from codex_usage import collect_codex_usage, current_codex_session_ids, default_codex_home
+    from token_usage import (
+        collect_runtime_usage,
+        current_codex_session_ids,
+        current_omp_session_files,
+        default_codex_home,
+    )
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -119,7 +129,7 @@ def _metrics_template(task_id: str) -> str:
 ## 统一口径
 
 - 开始和结束时间统一显示为 UTC+8 的 ISO 8601 时间（`+08:00`），实际时刻和墙钟用时不变。
-- Codex 环境默认从当前 session 的 `token_count.last_token_usage` 自动采集并按累计快照去重；其他环境可显式传入精确值。`cached input` 是 input 的子集，`reasoning` 是 output 的子集，总量不得重复相加。取不到精确值时写 `NOT_AVAILABLE`，不得用 0 冒充。
+- 有效 Codex session id 优先从 `token_count.info.last_token_usage` 自动采集并去重；否则 OMP 从当前主 session 及其嵌套 agent 的 assistant `usage` / `model_usage` 按阶段窗口汇总。其他环境可显式传入精确值。`cached input` 是 input 的子集，`reasoning` 是 output 的子集，总量不得重复相加。取不到精确值时写 `NOT_AVAILABLE`，不得用 0 冒充。
 - 返工次数只统计阶段重新进入：Gate B 打回、S4 FAIL 回 S3、Gate C 评审回流或实质偏离退回 S2；同一轮内的小修不计。
 - 效率比 = 有效产出单元 /（有效产出单元 + 返工影响单元）；分母为 0 时写 `N/A`。单元定义按阶段产物中的验收项、改动项或验证项计数。
 - 用时为本阶段 `metrics-start` 至本次阶段退出的墙钟时间，阻塞和取消也必须留记录。
@@ -144,7 +154,7 @@ def _unfinished_metric_stages(root: Path, task_id: str, current_stage: str) -> L
     )
 
 
-def _merge_session_ids(*groups: Optional[List[str]]) -> List[str]:
+def _merge_unique(*groups: Optional[List[str]]) -> List[str]:
     result = []
     for group in groups:
         for value in group or []:
@@ -158,15 +168,22 @@ def _start_stage_metrics(root: Path, task_id: str, stage: str, started_at: str) 
     if not document.is_file():
         _atomic_write_text(document, _metrics_template(task_id))
     marker = _metric_marker_path(root, task_id, stage)
-    current_sessions = current_codex_session_ids()
+    current_codex_sessions = current_codex_session_ids()
+    current_omp_sessions = [] if current_codex_sessions else current_omp_session_files(
+        command_hints=["metrics-start", task_id]
+    )
     if marker.is_file():
         active = json.loads(_read_text(marker))
         normalized_started_at = _normalize_metric_timestamp(active["started_at"])
         marker_changed = normalized_started_at != active["started_at"]
         active["started_at"] = normalized_started_at
-        tracked_sessions = _merge_session_ids(active.get("codex_session_ids"), current_sessions)
-        if tracked_sessions != active.get("codex_session_ids", []):
-            active["codex_session_ids"] = tracked_sessions
+        tracked_codex_sessions = _merge_unique(active.get("codex_session_ids"), current_codex_sessions)
+        tracked_omp_sessions = _merge_unique(active.get("omp_session_files"), current_omp_sessions)
+        if tracked_codex_sessions != active.get("codex_session_ids", []):
+            active["codex_session_ids"] = tracked_codex_sessions
+            marker_changed = True
+        if tracked_omp_sessions != active.get("omp_session_files", []):
+            active["omp_session_files"] = tracked_omp_sessions
             marker_changed = True
         if marker_changed:
             _atomic_write_text(marker, json.dumps(active, ensure_ascii=False, indent=2) + "\n")
@@ -174,7 +191,8 @@ def _start_stage_metrics(root: Path, task_id: str, stage: str, started_at: str) 
             "status": "ALREADY_RUNNING",
             "stage": stage,
             "attempt": active.get("attempt"),
-            "codex_session_count": len(tracked_sessions),
+            "codex_session_count": len(tracked_codex_sessions),
+            "omp_session_count": len(tracked_omp_sessions),
         }
     attempts = len(re.findall(r"^## " + re.escape(stage) + r" · 尝试 \d+$", _read_text(document), re.MULTILINE))
     active = {
@@ -182,7 +200,8 @@ def _start_stage_metrics(root: Path, task_id: str, stage: str, started_at: str) 
         "stage": stage,
         "attempt": attempts + 1,
         "started_at": started_at,
-        "codex_session_ids": current_sessions,
+        "codex_session_ids": current_codex_sessions,
+        "omp_session_files": current_omp_sessions,
     }
     _atomic_write_text(marker, json.dumps(active, ensure_ascii=False, indent=2) + "\n")
     return {
@@ -190,7 +209,8 @@ def _start_stage_metrics(root: Path, task_id: str, stage: str, started_at: str) 
         "stage": stage,
         "attempt": active["attempt"],
         "started_at": started_at,
-        "codex_session_count": len(current_sessions),
+        "codex_session_count": len(current_codex_sessions),
+        "omp_session_count": len(current_omp_sessions),
     }
 
 
@@ -286,6 +306,8 @@ def record_stage_metrics(
     auto_tokens: bool = True,
     codex_session_ids: Optional[List[str]] = None,
     codex_home: Optional[Path] = None,
+    omp_session_files: Optional[List[str]] = None,
+    omp_agent_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     valid, reason = validate_task_id(task_id)
     if not valid:
@@ -321,14 +343,27 @@ def record_stage_metrics(
     )
     token_collection = None
     if auto_tokens and not explicit_tokens:
-        selected_sessions = _merge_session_ids(
-            active.get("codex_session_ids"), codex_session_ids, current_codex_session_ids()
-        )
-        token_collection = collect_codex_usage(
+        if omp_session_files is not None and not codex_session_ids:
+            selected_codex_sessions = []
+        else:
+            selected_codex_sessions = _merge_unique(
+                active.get("codex_session_ids"), codex_session_ids, current_codex_session_ids()
+            )
+        if omp_session_files is not None:
+            selected_omp_sessions = _merge_unique(omp_session_files)
+        else:
+            current_omp_sessions = [] if selected_codex_sessions else current_omp_session_files(
+                omp_agent_dir=omp_agent_dir,
+                command_hints=["metrics-record", task_id],
+            )
+            selected_omp_sessions = _merge_unique(active.get("omp_session_files"), current_omp_sessions)
+        token_collection = collect_runtime_usage(
             active["started_at"],
             ended_at,
-            selected_sessions,
+            selected_codex_sessions,
             codex_home or default_codex_home(),
+            selected_omp_sessions or None,
+            omp_agent_dir,
         )
         if token_collection.get("available"):
             for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "total_tokens"):
@@ -404,6 +439,8 @@ def backfill_stage_metrics(
     codex_home: Optional[Path],
     dry_run: bool = False,
     force: bool = False,
+    omp_session_files: Optional[List[str]] = None,
+    omp_agent_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     valid, reason = validate_task_id(task_id)
     if not valid:
@@ -415,9 +452,21 @@ def backfill_stage_metrics(
     document = _metrics_path(root, task_id)
     if not document.is_file():
         raise ValueError("metrics document does not exist: " + str(document))
-    session_ids = _merge_session_ids(
-        codex_session_ids if codex_session_ids else current_codex_session_ids()
-    )
+    if omp_session_files is not None and not codex_session_ids:
+        session_ids = []
+    else:
+        session_ids = _merge_unique(
+            codex_session_ids if codex_session_ids else current_codex_session_ids()
+        )
+    if omp_session_files is not None:
+        selected_omp_sessions = _merge_unique(omp_session_files)
+    else:
+        selected_omp_sessions = _merge_unique(
+            [] if session_ids else current_omp_session_files(
+                omp_agent_dir=omp_agent_dir,
+                command_hints=["metrics-backfill", task_id],
+            )
+        )
     home = codex_home or default_codex_home()
     results = []  # type: List[Dict[str, Any]]
     changed = 0
@@ -438,11 +487,13 @@ def backfill_stage_metrics(
         if token_line.group(1) != "NOT_AVAILABLE" and not force:
             results.append({"stage": stage, "attempt": attempt, "status": "UNCHANGED", "reason": "token values already exist"})
             return section
-        collection = collect_codex_usage(
+        collection = collect_runtime_usage(
             started.group(1),
             ended.group(1),
             session_ids,
             home,
+            selected_omp_sessions or None,
+            omp_agent_dir,
         )
         if not collection.get("available"):
             results.append(
@@ -703,7 +754,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     metric.add_argument("--token-source")
     metric.add_argument("--codex-session-id", action="append", help="覆盖或补充自动采集的 Codex session UUID")
     metric.add_argument("--codex-home", help="Codex 数据目录，默认使用 CODEX_HOME 或当前用户 .codex")
-    metric.add_argument("--no-auto-tokens", action="store_true", help="禁用本次 Codex session 自动采集")
+    metric.add_argument("--omp-session-file", action="append", help="显式指定 OMP 主 session JSONL，可重复")
+    metric.add_argument("--omp-agent-dir", help="OMP agent 数据目录，默认使用 PI_CODING_AGENT_DIR 或当前用户 .omp/agent")
+    metric.add_argument("--no-auto-tokens", action="store_true", help="禁用本次 session Token 自动采集")
     metric.add_argument("--rework-count", type=int, default=0)
     metric.add_argument("--accepted-units", type=int)
     metric.add_argument("--rework-units", type=int)
@@ -713,6 +766,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     backfill.add_argument("--stage", action="append", choices=STAGES, help="只回填指定阶段，可重复")
     backfill.add_argument("--codex-session-id", action="append", help="提供历史阶段对应的 Codex session UUID，可重复")
     backfill.add_argument("--codex-home", help="Codex 数据目录，默认使用 CODEX_HOME 或当前用户 .codex")
+    backfill.add_argument("--omp-session-file", action="append", help="提供历史阶段对应的 OMP 主 session JSONL，可重复")
+    backfill.add_argument("--omp-agent-dir", help="OMP agent 数据目录，默认使用 PI_CODING_AGENT_DIR 或当前用户 .omp/agent")
     backfill.add_argument("--dry-run", action="store_true")
     backfill.add_argument("--force", action="store_true", help="覆盖已有精确 Token 值")
     transition = sub.add_parser("can-transition")
@@ -754,6 +809,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 not args.no_auto_tokens,
                 args.codex_session_id,
                 Path(args.codex_home).resolve() if args.codex_home else None,
+                args.omp_session_file,
+                Path(args.omp_agent_dir).resolve() if args.omp_agent_dir else None,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
@@ -764,8 +821,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 args.stage,
                 args.codex_session_id,
                 Path(args.codex_home).resolve() if args.codex_home else None,
-                args.dry_run,
-                args.force,
+                dry_run=args.dry_run,
+                force=args.force,
+                omp_session_files=args.omp_session_file,
+                omp_agent_dir=Path(args.omp_agent_dir).resolve() if args.omp_agent_dir else None,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0

@@ -87,14 +87,6 @@ python gui/server.py --workspace .
 
 打开 `http://127.0.0.1:8765/`。GUI 可查看需求、状态和阶段产物，创建 PRD，写入当前正在等待的闸口答复，并显示只读 Git 状态。
 
-需要面向研发负责人的只读效率分析时，运行：
-
-```bash
-python gui/dashboard_server.py --workspace .
-```
-
-打开 `http://127.0.0.1:8766/`。Workflow Lens 读取本地 `state.md` 与 `metrics.md`，提供并行需求时间轴、阶段画布、Token 构成、时间分布和返工下钻；缺失指标保持 `NOT AVAILABLE`，不会估算。该服务只监听本机并拒绝写请求。
-
 原生版“设置 → 技能挂载”只检测公开的固定目录：工作区原生 `skills/*.md`，Codex 的 `.codex/skills`，Claude Code 的 `.claude/skills` 和旧式 `.claude/commands`，Cursor 的 `.cursor/skills`，Gemini CLI 的 `.gemini/skills`，GitHub Copilot 的 `.github/skills`/`~/.copilot/skills`，Windsurf/Cascade 的 `.windsurf/skills`/`~/.codeium/windsurf/skills`，以及通用 `.agents/skills`；工作区级和用户级目录存在时分别检测。已安装插件或扩展只通过公开的本地根和白名单配置/manifest 补充，不猜测 Marketplace 临时缓存。
 
 “发现”不代表某个 Agent 当前已启用该技能，界面会把来源状态、编排状态、来源类型和启用证据分开显示。外部目录始终只读；用户点击“加入编排”后，程序才在当前工作区创建默认停用的适配器，再显式配置 S1～S6 挂载点、触发条件和顺序。“重新检测”按需重扫，不使用 watcher、后台扫描或新依赖。环境覆盖和各平台用户级路径见 `PORTING.md`。
@@ -125,4 +117,4 @@ python gui/server.py --self-test --workspace .
 
 第一条检查入口和阶段上下文预算、机器清单及项目配置；第二条验证共享核心与旧状态兼容；第三条验证 GUI。
 
-每个阶段先运行 `metrics-start`，退出前运行 `metrics-record`；开始和结束时间统一显示为 UTC+8（ISO 8601 `+08:00`）。Codex 环境会从当前 session 的 `token_count.last_token_usage` 自动采集精确增量并去重，其他环境仍可显式传值，无法核验时写 `NOT_AVAILABLE`。`metrics.md` 与按需生成的影响面图均为过程产物，不得加入任何目标项目的需求 commit 或 MR/PR。
+每个阶段先运行 `metrics-start`，退出前运行 `metrics-record`；开始和结束时间统一显示为 UTC+8（ISO 8601 `+08:00`）。有效 Codex session id 优先从 `token_count.info.last_token_usage` 采集精确增量并去重；OMP 环境从当前主 session 及其嵌套 agent 的 assistant `usage` / `model_usage` 按阶段窗口汇总。其他环境仍可显式传值，无法核验时写 `NOT_AVAILABLE`。`metrics.md` 与按需生成的影响面图均为过程产物，不得加入任何目标项目的需求 commit 或 MR/PR。

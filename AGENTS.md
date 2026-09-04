@@ -10,7 +10,7 @@
 4. 运行 `python workflow/workflowctl.py context <id>`。
 5. 只读取命令返回的 `required` 文件；其中包含 `config/skills.md` 静态挂载表里对本阶段启用的技能。
 6. 执行当前阶段 `SKILL.md`；只有遇到相应动作时才读取 `references_on_demand`。
-7. 阶段完成、失败、阻塞、取消或进入回路前，运行 `metrics-record` 把 token、返工、效率比和用时写入唯一的 `work/<id>/metrics.md`，再更新 `state.md`；Codex 环境会自动读取当前 session 的精确 token 增量，缺失时如实写 `NOT_AVAILABLE`；下一轮重新从第 2 步开始。
+7. 阶段完成、失败、阻塞、取消或进入回路前，运行 `metrics-record` 把 token、返工、效率比和用时写入唯一的 `work/<id>/metrics.md`，再更新 `state.md`；Codex 与 OMP 环境会自动读取当前 session 的精确 token 增量，缺失时如实写 `NOT_AVAILABLE`；下一轮重新从第 2 步开始。
 
 没有 shell 时，人工按同样顺序提供文件内容；`workflow/manifest.json` 是状态、风险、闸口和路由的机器权威定义。
 
