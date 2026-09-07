@@ -26,9 +26,10 @@ description: Implement an approved plan while preserving user work and repositor
 ## 偏离
 
 细节调整写入日志；范围扩大、数据结构、公共 API、风险等级或影响面关系变化属于实质性偏离，返回 S2，更新方案并重新判断闸口 B。
+发生回流且已有交付物时，将 `delivery.md` 标为 `- 交付状态: STALE`，把旧补丁移入 `delivery/history/` 保留；同步更新当前摘要，旧版本不再作为可交付对象。内容指纹变化也会被 `context` 自动报告为 STALE，无需改写历史验证或批准记录。
 
 ## 输出
 
 代码与正式变更文档提交及 `work/<id>/impl-log.md`。不得修改无关代码或丢弃无法确认归属的现有修改。
 
-进入 S4、返回 S2 或 BLOCKED 前，按 `workflow/references/metrics.md` 完成本轮记录；进入回路时如实增加返工次数。
+进入 S4、返回 S2 或 BLOCKED 前，按 `workflow/references/metrics.md` 完成本轮记录；进入回路时按唯一事件 ID 登记类型、回路和证据，不在多个阶段重复累加。

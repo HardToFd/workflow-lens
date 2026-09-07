@@ -6,6 +6,7 @@ description: Turn an approved analysis into a minimal, reviewable implementation
 # S2 技术方案
 
 开始前运行 `metrics-start`。默认用 `analysis.md` 的影响面表和 `plan.md` 的审批摘要推进 Gate B，不等待流程图。
+已有交付物的需求返回本阶段修订时，先将 `delivery.md` 的当前摘要标记 `- 交付状态: STALE`，旧补丁移入 `delivery/history/` 并保留字节与原路径记录；不得继续使用旧 MR 描述。历史审批保留，当前生效合同和版本必须单独更新。
 
 ## 输入
 
@@ -23,9 +24,13 @@ description: Turn an approved analysis into a minimal, reviewable implementation
 6. 读取目标项目的变更文档配置，在 `plan.md` 改动清单中明确正式变更文档路径；项目配置要求集中日志时，同时列出需要追加的日志文件。
 7. 仅当需求跨项目、存在复杂异步链路，或人类明确要求分享图时，按需读取 `workflow/references/impact-visualization.md`；图是辅助材料，不阻塞方案审批。
 
+审批摘要用最小前后对照确认接口结构、ID 来源/关联、嵌套字段类型、数据粒度和连接/schema 边界；直接引用 S1 脱敏真实样例，不另造大模板。为每个 `CONTRACT_GAP` 指定验证动作和未验证边界；曾失败的原 payload 必须进入对应回归输入，不能只补一个符合实现假设的合成样例。
+
 ## 闸口
 
 按 `workflow/references/gates.md` 判断是否需要闸口 B。R2/R3 必须审批；R0/R1 只有在项目配置明确允许时才能跳过，并在 `state.md` 留下策略依据。
+
+项目明确配置 R1 自动策略且满足 `r1_lightweight` 条件时，用简短 analysis/plan 保留影响面、合同差异、定向验证和回滚即可；必要产物可连续完成，不为阶段切换或相同环境风险追加确认。范围、基线适配或动作仍在既有批准范围内时继承该授权并引用原记录；合同/风险实质变化重新判断 Gate B。此路径不跳过 R2/R3 Gate B、Gate C，也不扩展到未授权的推送、部署、合并或数据操作。
 
 ## 输出与完成判据
 

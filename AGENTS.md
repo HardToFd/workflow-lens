@@ -6,11 +6,12 @@
 
 1. 从用户输入取得需求 id；不存在时请用户提供。
 2. 运行 `python workflow/workflowctl.py validate-id <id>`。
-3. 运行 `python workflow/workflowctl.py metrics-start <id>`，开始本阶段计时。
-4. 运行 `python workflow/workflowctl.py context <id>`。
+3. 运行 `python workflow/workflowctl.py context <id>`，先确认目标项目、阶段及 `runnable`。跨项目可用 `--project <注册名>` 指定目标；全部阻塞或等待时不开始新计时。
+4. 对可执行目标运行 `python workflow/workflowctl.py metrics-start <id>`；指定项目时与 context 使用相同 `--project`，开始本阶段计时。
 5. 只读取命令返回的 `required` 文件；其中包含 `config/skills.md` 静态挂载表里对本阶段启用的技能。
+   同时检查 `delivery.status`：`STALE` 的旧交付物不得复用；`UNVERIFIED` 表示旧材料尚未登记内容快照，不代表验证失败或需要恢复已归档需求。
 6. 执行当前阶段 `SKILL.md`；只有遇到相应动作时才读取 `references_on_demand`。
-7. 阶段完成、失败、阻塞、取消或进入回路前，运行 `metrics-record` 把 token、返工、效率比和用时写入唯一的 `work/<id>/metrics.md`，再更新 `state.md`；Codex 与 OMP 环境会自动读取当前 session 的精确 token 增量，缺失时如实写 `NOT_AVAILABLE`；下一轮重新从第 2 步开始。
+7. 阶段完成、失败、阻塞、取消或进入回路前，运行 `metrics-record` 把 token、区间用时和有证据的等待秒数写入唯一的 `work/<id>/metrics.md`，再更新 `state.md`；回流用 `rework-record` 登记唯一事件（口径见当前阶段加载的 metrics 参考）。Codex 与 OMP 自动采集精确 token，缺失写 `NOT_AVAILABLE`；旧返工数字/单元比不作质量汇总，下一轮从第 2 步开始。
 
 没有 shell 时，人工按同样顺序提供文件内容；`workflow/manifest.json` 是状态、风险、闸口和路由的机器权威定义。
 

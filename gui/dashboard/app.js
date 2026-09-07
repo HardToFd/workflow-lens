@@ -7,7 +7,7 @@ const STAGE_NAMES = {
   S3: "实现",
   S4: "验证",
   S5: "交付",
-  S6: "完成归档",
+  S6: "归档收尾",
 };
 const ARTIFACT_STAGE = {
   "analysis.md": "S1",
@@ -18,6 +18,7 @@ const ARTIFACT_STAGE = {
   "state.md": "S6",
 };
 const STATUS_ORDER = { blocked: 0, active: 1, archived: 2, cancelled: 3 };
+const REWORK_TYPES = { defect: "实现缺陷", scope_change: "范围变更", baseline_adaptation: "基线适配", environment: "环境阻塞", workflow_migration: "流程迁移" };
 const TIMELINE_MIN_SCALE = 1;
 const TIMELINE_MAX_SCALE = 3;
 const numberFormat = new Intl.NumberFormat("zh-CN");
@@ -47,7 +48,7 @@ const state = {
   commandItems: [],
 };
 
-const elements = {
+const elements = typeof document === "undefined" ? {} : {
   appShell: document.querySelector("#app-shell"),
   sidebar: document.querySelector("#sidebar"),
   sidebarScrim: document.querySelector("#sidebar-scrim"),
@@ -116,6 +117,13 @@ const elements = {
   metricDrilldownCaption: document.querySelector("#metric-drilldown-caption"),
   metricDrilldownSource: document.querySelector("#metric-drilldown-source"),
   metricDrilldownKpis: document.querySelector("#metric-drilldown-kpis"),
+  efficiencyOverview: document.querySelector("#efficiency-overview"),
+  efficiencyOverviewValue: document.querySelector("#efficiency-overview-value"),
+  efficiencyOverviewCoverage: document.querySelector("#efficiency-overview-coverage"),
+  efficiencyOverviewNote: document.querySelector("#efficiency-overview-note"),
+  efficiencyOverviewScope: document.querySelector("#efficiency-overview-scope"),
+  efficiencyDetail: document.querySelector("#efficiency-detail"),
+  efficiencyDetailBody: document.querySelector("#efficiency-detail-body"),
   tokenCompositionChart: document.querySelector("#token-composition-chart"),
   durationDistributionChart: document.querySelector("#duration-distribution-chart"),
   metricStageDetailTitle: document.querySelector("#metric-stage-detail-title"),
@@ -199,21 +207,48 @@ function formatTokens(value) {
   return Number.isFinite(value) ? compactNumberFormat.format(value) : "—";
 }
 
+function recordedMetricLabel(value, coverage, total, formatter) {
+  return formatter(value) + (Number.isFinite(value) && coverage < total ? "（部分）" : "");
+}
+
+function waitingLabel(value) {
+  return Number.isFinite(value) ? formatDuration(value) : "NOT_AVAILABLE";
+}
+
 function formatPercent(value) {
   return Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "—";
 }
 
-function average(values) {
-  const valid = values.filter(Number.isFinite);
-  return valid.length ? valid.reduce((sum, value) => sum + value, 0) / valid.length : null;
+function statusMeta(task) {
+  const lifecycle = task.lifecycle || task.detail?.lifecycle;
+  const stable = {
+    ACTIVE: { key: "active", label: "进行中" },
+    BLOCKED: { key: "blocked", label: "阻塞" },
+    WAITING: { key: "blocked", label: "等待" },
+    ARCHIVED: { key: "archived", label: "已归档" },
+    CANCELLED: { key: "cancelled", label: "已作废" },
+  };
+  if (stable[lifecycle?.state]) return stable[lifecycle.state];
+  const value = String(task.status || "").toLowerCase();
+  if (/(?:^|[（(；;，,\s])(?:需求)?(?:已)?(?:作废|取消|cancelled|canceled)(?:$|[（(）)；;，,。\s])/.test(value)) return stable.CANCELLED;
+  if (/blocked|阻塞/.test(value)) return stable.BLOCKED;
+  if (/waiting|等待|^待/.test(value)) return stable.WAITING;
+  // 旧记录只能按阶段归档；“本地实现完成”等说明不改变 S3/S4 的生命周期。
+  if (task.phase === "S6") return stable.ARCHIVED;
+  return { key: "active", label: "进行中" };
 }
 
-function statusMeta(task) {
-  const value = `${task.status || ""} ${task.phase || ""}`.toLowerCase();
-  if (/作废|cancel/.test(value)) return { key: "cancelled", label: "已作废" };
-  if (/blocked|阻塞|等待/.test(value)) return { key: "blocked", label: "阻塞" };
-  if (/archived|已完成|完成|已验收/.test(value) || task.phase === "S6") return { key: "archived", label: "已归档" };
-  return { key: "active", label: "进行中" };
+function lifecycleEvidence(task) {
+  const lifecycle = task.lifecycle || task.detail?.lifecycle || {};
+  const fields = [
+    ["closure_reason", "关闭原因", { ACCEPTED_NO_MR: "无 MR 验收", MERGED: "已合入", CANCELLED: "作废", NONE: "未关闭" }],
+    ["delivery_form", "交付", { BRANCH: "分支", PATCH: "补丁", LOCAL: "本地", MIXED: "混合", NONE: "无" }],
+    ["acceptance", "验收", { PASS: "通过", NOT_RUN: "NOT_RUN" }],
+    ["merge", "合入", { MERGED: "已合入", NOT_MERGED: "未合入" }],
+    ["deployment", "部署验证", { VERIFIED: "已验证", NOT_RUN: "NOT_RUN" }],
+    ["cleanup", "清理", { COMPLETE: "完成", PENDING: "待处理", RETAINED: "保留" }],
+  ];
+  return fields.map(([key, label, labels]) => ({ label, value: labels[lifecycle[key]] || "UNKNOWN" }));
 }
 
 function classifyCategory(task) {
@@ -224,15 +259,6 @@ function classifyCategory(task) {
   if (/alert|预警|监控/.test(value)) return "监控告警";
   if (/download|下载|folder|目录/.test(value)) return "平台工具";
   return "其他需求";
-}
-
-function reworkReason(note) {
-  const value = note || "";
-  if (/冲突|合同|契约|方案|口径|不一致/.test(value)) return "方案或合同不一致";
-  if (/环境|授权|not_run|部署|redis|数据库|媒体/.test(value.toLowerCase())) return "环境或授权不足";
-  if (/测试|验证|构建|依赖/.test(value)) return "验证或依赖问题";
-  if (/范围|用户|需求变更/.test(value)) return "范围调整";
-  return "未归类备注";
 }
 
 async function api(path) {
@@ -248,60 +274,138 @@ async function api(path) {
 }
 
 function fieldValue(block, label) {
-  const expression = new RegExp(`^- ${escapeRegExp(label)}[：:]\\s*(?:\u0060([^\u0060\\n]*)\u0060|([^\\n]*))$`, "m");
+  const expression = new RegExp(`^- ${escapeRegExp(label)}[：:][ \\t]*(?:\u0060([^\u0060\\r\\n]*)\u0060|([^\\r\\n]*))[ \\t]*\\r?$`, "m");
   const match = block.match(expression);
   return match ? (match[1] ?? match[2] ?? "").trim() : "";
 }
 
+function parseMetricNumber(value, unit = "") {
+  let text = String(value ?? "").trim();
+  // 兼容 metrics-record 的历史格式：数值在反引号内，秒单位在外。
+  if (unit === "seconds") text = text.replace(/^`(\d+(?:\.\d+)?)`\s*(秒|s)$/, "$1 $2");
+  const suffix = unit === "seconds" ? "(?:\\s*(?:秒|s))?" : "";
+  if (!new RegExp(`^\\d+(?:\\.\\d+)?${suffix}$`).test(text)) return null;
+  const number = Number(text.replace(/\s*(?:秒|s)$/, ""));
+  return Number.isFinite(number) && number >= 0 && number <= Number.MAX_SAFE_INTEGER ? number : null;
+}
+
+function metricsSections(content) {
+  const headers = [...String(content || "").matchAll(/^##[ \t]+([^\r\n]+)[ \t]*\r?$/gm)];
+  return headers.map((match, index) => ({
+    heading: match[1].trim(),
+    block: content.slice(match.index + match[0].length, headers[index + 1]?.index ?? content.length),
+  }));
+}
+
 function parseMetrics(content) {
-  if (!content) return [];
-  const headers = [...content.matchAll(/^##\s+(S[1-6])\s+·\s+尝试\s+(\d+)\s*$/gm)];
-  return headers.map((match, index) => {
-    const startIndex = match.index + match[0].length;
-    const endIndex = index + 1 < headers.length ? headers[index + 1].index : content.length;
-    const block = content.slice(startIndex, endIndex);
+  return metricsSections(content).flatMap(({ heading, block }) => {
+    const match = heading.match(/^(S[1-6])\s+·\s+尝试\s+(\d+)$/);
+    if (!match) return [];
     const tokenLine = fieldValue(block, "Token");
-    const tokenMatch = tokenLine.match(/(?:^|,\s*)total=(\d+)/);
-    const duration = Number(fieldValue(block, "用时").replace(/[^\d.-]/g, ""));
-    const reworkCount = Number(fieldValue(block, "返工次数").replace(/[^\d.-]/g, ""));
-    const acceptedUnits = Number(fieldValue(block, "有效产出单元").replace(/[^\d.-]/g, ""));
-    const reworkUnits = Number(fieldValue(block, "返工影响单元").replace(/[^\d.-]/g, ""));
+    const tokenMatch = tokenLine.match(/(?:^|,\s*)total=(\d+)(?=\s*(?:,|$))/);
     const efficiencyText = fieldValue(block, "效率比");
-    const efficiency = /%$/.test(efficiencyText) ? Number(efficiencyText.replace("%", "")) / 100 : null;
+    const efficiencyValue = /^\d+(?:\.\d+)?%$/.test(efficiencyText) ? parseMetricNumber(efficiencyText.slice(0, -1)) : null;
+    const efficiency = Number.isFinite(efficiencyValue) ? efficiencyValue / 100 : null;
     return {
       stage: match[1],
       attempt: Number(match[2]),
       result: fieldValue(block, "结果") || "UNKNOWN",
       start: fieldValue(block, "开始"),
       end: fieldValue(block, "结束"),
-      duration: Number.isFinite(duration) ? duration : null,
+      duration: parseMetricNumber(fieldValue(block, "用时"), "seconds"),
+      waitDuration: parseMetricNumber(fieldValue(block, "等待秒数")),
       tokenSource: fieldValue(block, "Token 来源"),
-      tokenTotal: tokenMatch ? Number(tokenMatch[1]) : null,
-      reworkCount: Number.isFinite(reworkCount) ? reworkCount : 0,
-      acceptedUnits: Number.isFinite(acceptedUnits) ? acceptedUnits : 0,
-      reworkUnits: Number.isFinite(reworkUnits) ? reworkUnits : 0,
-      efficiency: Number.isFinite(efficiency) ? efficiency : null,
+      tokenTotal: tokenMatch ? parseMetricNumber(tokenMatch[1]) : null,
+      legacyReworkCount: parseMetricNumber(fieldValue(block, "返工次数")),
+      hasLegacyRework: parseMetricNumber(fieldValue(block, "返工次数")) > 0,
+      acceptedUnits: parseMetricNumber(fieldValue(block, "有效产出单元")),
+      reworkUnits: parseMetricNumber(fieldValue(block, "返工影响单元")),
+      efficiency: Number.isFinite(efficiency) && efficiency <= 1 ? efficiency : null,
       note: fieldValue(block, "备注"),
       source: "metrics.md",
     };
   });
 }
 
+function parseReworkEvents(content) {
+  const grouped = new Map();
+  const labels = ["类型", "回路", "项目", "来源阶段", "目标阶段", "事件时间", "原因", "关联验收", "证据"];
+  metricsSections(content).forEach(({ heading, block }) => {
+    const match = heading.match(/^返工事件\s+(.+)$/);
+    if (!match) return;
+    // 自由文本原样保留 Markdown；只有结构化字段由工具包裹反引号。
+    const rawValue = (label) => (block.match(new RegExp(`^- ${escapeRegExp(label)}[：:][ \\t]*([^\\r\\n]*)`, "m"))?.[1] || "").trim();
+    const event = {
+      id: match[1].trim(), type: fieldValue(block, "类型"), loop: fieldValue(block, "回路"),
+      project: fieldValue(block, "项目"), fromStage: fieldValue(block, "来源阶段"), toStage: fieldValue(block, "目标阶段"),
+      time: fieldValue(block, "事件时间"), reason: rawValue("原因"),
+      acceptance: rawValue("关联验收"), evidence: rawValue("证据"),
+    };
+    const timestamp = event.time === "NOT_AVAILABLE" ? null : parseDate(event.time);
+    const timeParts = event.time.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/);
+    // Date 会把 2 月 30 日滚入 3 月；事件账本需拒绝这种非法日期。
+    const validCalendar = timeParts && Number(timeParts[1]) >= 1 && Number(timeParts[2]) >= 1 && Number(timeParts[2]) <= 12
+      && Number(timeParts[3]) >= 1 && Number(timeParts[3]) <= new Date(Date.UTC(Number(timeParts[1]), Number(timeParts[2]), 0)).getUTCDate()
+      && Number(timeParts[4]) < 24 && Number(timeParts[5]) < 60 && Number(timeParts[6]) < 60;
+    const valid = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(event.id)
+      && labels.every((label) => [...block.matchAll(new RegExp(`^- ${escapeRegExp(label)}[：:]`, "gm"))].length === 1)
+      && Object.values(event).every((value) => !/[\u0000-\u001f]/.test(value))
+      && Object.hasOwn(REWORK_TYPES, event.type) && ["L1", "L2", "L3", "NONE"].includes(event.loop)
+      && STAGES.includes(event.fromStage) && STAGES.includes(event.toStage)
+      && (event.loop !== "L1" || (event.type === "defect" && event.fromStage === "S4" && event.toStage === "S3"))
+      && event.project && event.reason && event.acceptance && event.evidence
+      && (event.time === "NOT_AVAILABLE" || (validCalendar && timestamp));
+    // 事件时间按同一时刻比较；不因等价时区写法误报同 ID 冲突。
+    if (valid && timestamp) event.time = new Date(timestamp.getTime() + 8 * 3600000).toISOString().replace(/\.\d{3}Z$/, "+08:00");
+    const rows = grouped.get(event.id) || [];
+    rows.push({ event, valid: Boolean(valid), signature: JSON.stringify(event) });
+    grouped.set(event.id, rows);
+  });
+  const events = [], conflicts = [], invalid = [];
+  let duplicates = 0;
+  grouped.forEach((rows, id) => {
+    if (new Set(rows.map((row) => row.signature)).size > 1) conflicts.push(id);
+    else if (rows.some((row) => !row.valid)) invalid.push(id);
+    else { events.push(rows[0].event); duplicates += rows.length - 1; }
+  });
+  return { events, conflicts, invalid, duplicates };
+}
+
+function reworkSummary(task, stage = null) {
+  const source = task.rework || { events: [], conflicts: [], invalid: [] };
+  const events = source.events.filter((event) => !stage || event.fromStage === stage);
+  const knownL1 = events.filter((event) => event.type === "defect" && event.loop === "L1").length;
+  const uncertain = source.conflicts.length + source.invalid.length;
+  const records = (task.records || []).filter((record) => !stage || record.stage === stage);
+  return {
+    events, conflicts: source.conflicts, invalid: source.invalid, knownCount: events.length, knownL1,
+    count: source.events.length && !uncertain ? events.length : null,
+    l1Count: source.events.length && !uncertain ? knownL1 : null,
+    legacyRecordCount: records.filter((record) => record.hasLegacyRework).length,
+  };
+}
+
+function eventCountLabel(summary) {
+  if (summary.conflicts.length || summary.invalid.length) return `待核对（已知 ${summary.knownCount}）`;
+  return Number.isFinite(summary.count) ? numberFormat.format(summary.count) : "NOT_AVAILABLE";
+}
+
+function reworkCoverageNote(summary) {
+  const notes = [`L1 缺陷 ${Number.isFinite(summary.l1Count) ? summary.l1Count : "NOT_AVAILABLE"}`];
+  if (summary.legacyRecordCount) notes.push(`${summary.legacyRecordCount} 条 legacy 阶段未按事件 ID 对齐`);
+  if (summary.conflicts.length) notes.push(`冲突 ID：${summary.conflicts.join("、")}`);
+  if (summary.invalid.length) notes.push(`无效事件：${summary.invalid.join("、")}`);
+  return notes.join(" · ");
+}
+
 function aggregateTask(task) {
   const records = task.records || [];
-  const allDurations = records.length && records.every((record) => Number.isFinite(record.duration));
-  const tokenRecords = records.filter((record) => Number.isFinite(record.tokenTotal));
-  const acceptedUnits = records.reduce((sum, record) => sum + record.acceptedUnits, 0);
-  const reworkUnits = records.reduce((sum, record) => sum + record.reworkUnits, 0);
-  const denominator = acceptedUnits + reworkUnits;
+  const durations = sumAvailable(records, "duration"), tokens = sumAvailable(records, "tokenTotal"), waits = sumAvailable(records, "waitDuration");
   return {
-    duration: allDurations ? records.reduce((sum, record) => sum + record.duration, 0) : null,
-    tokens: tokenRecords.length ? tokenRecords.reduce((sum, record) => sum + record.tokenTotal, 0) : null,
-    tokenCoverage: tokenRecords.length,
-    efficiency: denominator ? acceptedUnits / denominator : null,
-    reworkCount: records.length ? Math.max(...records.map((record) => record.reworkCount)) : 0,
-    acceptedUnits,
-    reworkUnits,
+    duration: durations.total, durationCoverage: durations.count,
+    tokens: tokens.total, tokenCoverage: tokens.count,
+    waitDuration: waits.total, waitCoverage: waits.count,
+    rework: reworkSummary(task),
   };
 }
 
@@ -310,11 +414,16 @@ async function enrichTask(task) {
     const detail = await api(`/api/tasks/${encodeURIComponent(task.id)}`);
     const metrics = detail.artifacts.find((artifact) => artifact.name === "metrics.md");
     let records = [];
+    let rework = parseReworkEvents("");
+    let metricsText = "";
     if (metrics?.exists && metrics.readable !== false) {
       const artifact = await api(`/api/tasks/${encodeURIComponent(task.id)}/artifacts/metrics.md`);
+      metricsText = artifact.content || "";
       records = parseMetrics(artifact.content);
+      rework = parseReworkEvents(artifact.content);
     }
-    const enriched = { ...task, detail, records };
+    const scoreBasis = globalThis.WorkflowEfficiency?.parseScoreBasis(metricsText) || null;
+    const enriched = { ...task, detail, lifecycle: detail.lifecycle || task.lifecycle, records, rework, scoreBasis };
     enriched.aggregate = aggregateTask(enriched);
     enriched.statusMeta = statusMeta(enriched);
     enriched.category = classifyCategory(enriched);
@@ -382,39 +491,95 @@ async function loadDashboard() {
   }
 }
 
-function completionEvidence() {
-  const completed = state.tasks.filter((task) => task.statusMeta.key === "archived");
-  return {
-    completed,
-    durations: completed.map((task) => task.aggregate.duration).filter(Number.isFinite),
-    tokens: completed.map((task) => task.aggregate.tokens).filter(Number.isFinite),
-  };
+function overviewMetricModel(tasks) {
+  const records = tasks.flatMap((task) => task.records || []);
+  const rework = { events: [], conflicts: [], invalid: [] };
+  tasks.forEach((task) => {
+    rework.events.push(...(task.rework?.events || []));
+    rework.conflicts.push(...(task.rework?.conflicts || []).map((id) => `${task.id}/${id}`));
+    rework.invalid.push(...(task.rework?.invalid || []).map((id) => `${task.id}/${id}`));
+  });
+  return { records, ...aggregateTask({ records, rework }) };
+}
+
+function scoreValue(value, decimals = 1) {
+  return Number.isFinite(value) ? value.toFixed(decimals) : "N/A";
+}
+
+function scoreNumber(value) {
+  return Number.isFinite(value) ? numberFormat.format(value) : "N/A";
+}
+
+function scoreReasonsMarkup(reasons) {
+  return `<ul>${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>`;
+}
+
+function efficiencyScopeMarkup(tasks, overview) {
+  if (!tasks.length) return '<p class="score-note">当前没有需求，评分覆盖为 N/A。</p>';
+  return `<ul>${tasks.map((task, index) => {
+    const result = overview.results[index];
+    const scored = result?.status === "SCORED" && Number.isFinite(result.score);
+    return `<li><strong>${escapeHtml(task.title || task.id)}</strong><span>${escapeHtml(task.id)} · ${scored ? `已纳入 · ${scoreValue(result.score)} 分 · T₀ ${scoreNumber(result.baselineTime)} 秒` : "未纳入 · N/A"}</span>${scored ? "" : scoreReasonsMarkup(result?.reasons || ["评分模块未加载，请刷新页面。"])}</li>`;
+  }).join("")}</ul>`;
+}
+
+function renderEfficiencyOverview() {
+  const overview = globalThis.WorkflowEfficiency?.scoreOverview(state.tasks);
+  const scored = overview && Number.isFinite(overview.score);
+  elements.efficiencyOverview.dataset.scoreStatus = scored ? "SCORED" : "NOT_AVAILABLE";
+  elements.efficiencyOverviewValue.textContent = scoreValue(overview?.score);
+  if (!overview) {
+    elements.efficiencyOverviewCoverage.textContent = "评分模块未加载";
+    elements.efficiencyOverviewNote.textContent = "刷新页面以加载评分模块；现有过程记录可继续查看。";
+    elements.efficiencyOverviewScope.innerHTML = efficiencyScopeMarkup(state.tasks, { results: [] });
+    return;
+  }
+  elements.efficiencyOverviewCoverage.textContent = `已验收归档覆盖 ${overview.scoredCount} / ${overview.acceptedCount}（${Number.isFinite(overview.coverage) ? formatPercent(overview.coverage) : "N/A"}）`;
+  elements.efficiencyOverviewNote.textContent = `全部需求覆盖 ${overview.scoredCount} / ${overview.totalCount}（${Number.isFinite(overview.allCoverage) ? formatPercent(overview.allCoverage) : "N/A"}） · ${scored ? "仅汇总有效样本，分数上限 100。" : "暂无可评分样本；缺失依据保持 N/A。"}`;
+  elements.efficiencyOverviewScope.innerHTML = efficiencyScopeMarkup(state.tasks, overview);
+}
+
+function efficiencyDetailMarkup(task, result) {
+  const scored = result.status === "SCORED" && Number.isFinite(result.score);
+  const basis = task.scoreBasis || {};
+  const totals = result.totals || {};
+  const factors = result.factors || {};
+  const coefficient = (value) => Number.isFinite(value) ? formatPercent(value) : "N/A";
+  const components = [
+    { name: "时间系数", weight: "35%", value: factors.time, note: `T₀ ${scoreNumber(basis.baselineTime)} 秒 / T ${scoreNumber(totals.time)} 秒` },
+    { name: "Token 系数", weight: "25%", value: factors.token, note: `K₀ ${scoreNumber(basis.baselineTokens)} / K ${scoreNumber(totals.tokens)}` },
+    { name: "质量系数", weight: "40%", value: factors.quality, note: `冻结验收项 N ${scoreNumber(totals.acceptanceItems ?? basis.acceptanceItems)} · 缺陷事件 R ${scoreNumber(totals.defects)}` },
+  ];
+  const metadata = [
+    ["基准版本 / 分组", [basis.baselineVersion, basis.baselineGroup].filter(Boolean).join(" / ") || "N/A"],
+    ["冻结时间", basis.frozenAt || "N/A"],
+    ["基准依据", basis.evidence || "N/A"],
+    ["完整性核对证据", basis.reviewEvidence || "N/A"],
+  ];
+  return `<div class="score-summary"><div class="score-readout"><h5>当前需求</h5><div><strong>${scored ? scoreValue(result.score) : "N/A"}</strong><span>/ 100</span></div><p>${scored ? "已纳入综合分" : "未纳入综合分"}</p></div><div class="score-components">${components.map((component) => `<article class="score-component"><h5>${component.name} · ${component.weight}</h5><strong>${coefficient(component.value)}</strong><p>${escapeHtml(component.note)}</p></article>`).join("")}</div></div>${scored ? "" : `<div class="score-reasons"><strong>暂不可评分</strong>${scoreReasonsMarkup(result.reasons || [])}<p>仅按已有证据补齐 metrics.md 中的「综合效率评分依据」；历史缺失基准保持 N/A。</p></div>`}<dl class="score-basis">${metadata.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl><div class="score-formula"><code>E = 100 × (T₀ / max(T₀, T))^0.35 × (K₀ / max(K₀, K))^0.25 × (N / (N + R))^0.40</code><p>T 汇总全部尝试的记录区间，包含区间内等待；显式等待不再次相加。K 为全部尝试的 Token。R 按唯一 ID 统计全部回路的 defect 事件，N 为冻结验收项数。</p><p>低于基准不额外加分，最高 100 分；整体按可评分需求的 T₀ 加权。</p></div>`;
+}
+
+function renderEfficiencyDetail(task) {
+  const result = globalThis.WorkflowEfficiency?.scoreTask(task) || { status: "NOT_AVAILABLE", score: null, reasons: ["评分模块未加载，请刷新页面。"] };
+  elements.efficiencyDetail.dataset.scoreStatus = result.status;
+  elements.efficiencyDetailBody.innerHTML = efficiencyDetailMarkup(task, result);
 }
 
 function renderMetrics() {
-  const evidence = completionEvidence();
+  renderEfficiencyOverview();
   const metricTasks = state.tasks.filter((task) => task.records.length);
-  const totalAccepted = metricTasks.reduce((sum, task) => sum + task.aggregate.acceptedUnits, 0);
-  const totalReworkUnits = metricTasks.reduce((sum, task) => sum + task.aggregate.reworkUnits, 0);
-  const efficiencyDenominator = totalAccepted + totalReworkUnits;
-  const totalRework = metricTasks.reduce((sum, task) => sum + task.aggregate.reworkCount, 0);
-  const durationAverage = average(evidence.durations);
-  const tokenAverage = average(evidence.tokens);
-
+  const model = overviewMetricModel(state.tasks);
+  const archived = state.tasks.filter((task) => task.statusMeta.key === "archived").length;
   elements.metricTotal.textContent = numberFormat.format(state.tasks.length);
-  elements.metricTotalNote.textContent = `${evidence.completed.length} 已归档 · ${state.tasks.length - evidence.completed.length} 未归档`;
-  elements.metricDurationAverage.textContent = formatDuration(durationAverage);
-  elements.metricDurationRange.textContent = evidence.durations.length
-    ? `最短 ${formatDuration(Math.min(...evidence.durations))} · 最长 ${formatDuration(Math.max(...evidence.durations))}`
-    : `最短 — · 最长 — · 0/${evidence.completed.length} 个完成需求具备完整度量`;
-  elements.metricTokenAverage.textContent = formatTokens(tokenAverage);
-  elements.metricTokenRange.textContent = evidence.tokens.length
-    ? `最低 ${formatTokens(Math.min(...evidence.tokens))} · 最高 ${formatTokens(Math.max(...evidence.tokens))}`
-    : `最低 — · 最高 — · 0/${evidence.completed.length} 个完成需求具备完整 Token`;
-  elements.metricEfficiency.textContent = formatPercent(efficiencyDenominator ? totalAccepted / efficiencyDenominator : null);
-  elements.metricRework.textContent = `返工 ${numberFormat.format(totalRework)} 次 · ${metricTasks.length} 个需求有度量`;
+  elements.metricTotalNote.textContent = `${archived} 已归档；验收、合入和部署分别记录`;
+  elements.metricDurationAverage.textContent = recordedMetricLabel(model.duration, model.durationCoverage, model.records.length, formatDuration);
+  elements.metricDurationRange.textContent = `${model.durationCoverage}/${model.records.length} 个区间 · 显式等待 ${Number.isFinite(model.waitDuration) ? formatDuration(model.waitDuration) : "NOT_AVAILABLE"}（${model.waitCoverage}/${model.records.length}）`;
+  elements.metricTokenAverage.textContent = recordedMetricLabel(model.tokens, model.tokenCoverage, model.records.length, formatTokens);
+  elements.metricTokenRange.textContent = `${model.tokenCoverage}/${model.records.length} 条有数值 · ${model.tokenCoverage === model.records.length && model.records.length ? "已记录值合计" : "部分合计，缺失未补零"}`;
+  elements.metricEfficiency.textContent = eventCountLabel(model.rework);
+  elements.metricRework.textContent = reworkCoverageNote(model.rework);
   elements.coverageValue.textContent = `${metricTasks.length}/${state.tasks.length || 0}`;
-  elements.coverageCaption.textContent = state.tasks.length ? `${((metricTasks.length / state.tasks.length) * 100).toFixed(1)}% 的需求存在 metrics.md` : "没有需求";
+  elements.coverageCaption.textContent = state.tasks.length ? `${((metricTasks.length / state.tasks.length) * 100).toFixed(1)}% 的需求有阶段记录` : "没有需求";
 }
 
 function trendPoints() {
@@ -474,7 +639,7 @@ function renderStatus() {
   const entries = [
     ["archived", "已归档"],
     ["active", "进行中"],
-    ["blocked", "阻塞"],
+    ["blocked", "阻塞 / 等待"],
     ["cancelled", "已作废"],
   ];
   elements.statusChart.innerHTML = `<div class="status-track" aria-hidden="true">${entries.map(([key]) => `<span class="status-segment status-segment--${key}" style="width:${(counts[key] / total) * 100}%"></span>`).join("")}</div><div class="status-legend">${entries.map(([key, label]) => `<div><span class="status-symbol status-symbol--${key}" aria-hidden="true"></span><span>${label}</span><strong>${counts[key]}</strong></div>`).join("")}</div>`;
@@ -502,24 +667,23 @@ function renderStages() {
 }
 
 function renderRework() {
-  let events = state.tasks.flatMap((task) => task.records.filter((record) => record.result === "FAIL").map((record) => ({ task, record })));
+  const events = state.tasks.flatMap((task) => (task.rework?.events || []).map((event) => ({ task, event })));
+  const summary = overviewMetricModel(state.tasks).rework;
+  const warning = `<p class="event-note">${escapeHtml(reworkCoverageNote(summary))}。仅展示已登记事件，不估算历史返工总数。</p>`;
   if (!events.length) {
-    events = state.tasks.flatMap((task) => task.records.filter((record) => record.reworkCount > 0).map((record) => ({ task, record })));
-  }
-  if (!events.length) {
-    elements.reworkList.innerHTML = '<div class="empty-inline"><strong>没有可核验返工原因</strong><span>当前 metrics.md 中没有 FAIL 或返工备注。</span></div>';
+    elements.reworkList.innerHTML = '<div class="empty-inline"><strong>未提供可计数的返工事件</strong><span>NOT_AVAILABLE；旧阶段轮次数与 FAIL 记录不直接计作独立事件。</span></div>' + warning;
     return;
   }
   const grouped = new Map();
-  events.forEach(({ task, record }) => {
-    const reason = reworkReason(record.note);
+  events.forEach(({ task, event }) => {
+    const reason = REWORK_TYPES[event.type];
     const group = grouped.get(reason) || { reason, count: 0, samples: [] };
     group.count += 1;
-    if (group.samples.length < 2) group.samples.push(`${task.id} · ${record.stage} 尝试 ${record.attempt} · ${record.note || "备注缺失"}`);
+    if (group.samples.length < 2) group.samples.push(`${task.id} · ${event.id} · ${event.loop} · ${event.reason}`);
     grouped.set(reason, group);
   });
   const rows = [...grouped.values()].sort((a, b) => b.count - a.count);
-  elements.reworkList.innerHTML = rows.map((row) => `<article class="rework-item"><strong>${escapeHtml(row.reason)} · ${row.count} 次</strong>${row.samples.map((sample) => `<span title="${escapeHtml(sample)}">${escapeHtml(sample)}</span>`).join("")}</article>`).join("");
+  elements.reworkList.innerHTML = rows.map((row) => `<article class="rework-item"><strong>${escapeHtml(row.reason)} · ${row.count} 个已登记事件</strong>${row.samples.map((sample) => `<span title="${escapeHtml(sample)}">${escapeHtml(sample)}</span>`).join("")}</article>`).join("") + warning;
 }
 
 function assignGanttLanes(records, visibleSpan = 0) {
@@ -613,7 +777,7 @@ function filteredTasks() {
   return filtered.sort((a, b) => {
     if (state.filters.sort === "updated-asc") return (a.eventDate?.getTime() || 0) - (b.eventDate?.getTime() || 0);
     if (state.filters.sort === "status") return STATUS_ORDER[a.statusMeta.key] - STATUS_ORDER[b.statusMeta.key] || a.id.localeCompare(b.id);
-    if (state.filters.sort === "duration-desc") return (b.aggregate.duration || -1) - (a.aggregate.duration || -1);
+    if (state.filters.sort === "duration-desc") return (b.aggregate.duration ?? -1) - (a.aggregate.duration ?? -1);
     return (b.eventDate?.getTime() || 0) - (a.eventDate?.getTime() || 0);
   });
 }
@@ -625,7 +789,7 @@ function renderDemandList() {
     elements.demandList.innerHTML = '<div class="empty-inline"><strong>没有匹配需求</strong><span>调整时间、状态或搜索条件。</span></div>';
     return;
   }
-  elements.demandList.innerHTML = tasks.map((task) => `<button class="demand-card${task.id === state.selectedTaskId ? " is-active" : ""}" type="button" data-task-id="${escapeHtml(task.id)}" aria-pressed="${task.id === state.selectedTaskId}"><span class="demand-card__title" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</span><span class="demand-card__meta"><span>${escapeHtml(task.statusMeta.label)} · ${escapeHtml(task.phase || "未开始")}</span><span>${escapeHtml(formatDate(task.eventDate))}</span></span><span class="demand-card__metrics"><span>${formatDuration(task.aggregate.duration)}</span><span>${formatTokens(task.aggregate.tokens)} Token</span></span></button>`).join("");
+  elements.demandList.innerHTML = tasks.map((task) => `<button class="demand-card${task.id === state.selectedTaskId ? " is-active" : ""}" type="button" data-task-id="${escapeHtml(task.id)}" aria-pressed="${task.id === state.selectedTaskId}"><span class="demand-card__title" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</span><span class="demand-card__meta"><span>${escapeHtml(task.statusMeta.label)} · ${escapeHtml(task.phase || "未开始")}</span><span>${escapeHtml(formatDate(task.eventDate))}</span></span><span class="demand-card__metrics"><span>${recordedMetricLabel(task.aggregate.duration, task.aggregate.durationCoverage, task.records.length, formatDuration)}</span><span>${recordedMetricLabel(task.aggregate.tokens, task.aggregate.tokenCoverage, task.records.length, formatTokens)} Token</span></span></button>`).join("");
 }
 
 function fallbackTimeline(task) {
@@ -639,9 +803,10 @@ function fallbackTimeline(task) {
     duration: null,
     tokenTotal: null,
     efficiency: null,
-    reworkCount: 0,
-    acceptedUnits: 0,
-    reworkUnits: 0,
+    waitDuration: null,
+    legacyReworkCount: null,
+    acceptedUnits: null,
+    reworkUnits: null,
     note: `${artifact.label} 已存在；metrics.md 未提供该阶段时间。`,
     source: artifact.name,
   }));
@@ -658,8 +823,7 @@ function detailEvents(task) {
 function summarizeStage(events, stage) {
   const stageEvents = events.filter((event) => event.stage === stage);
   const latest = stageEvents.at(-1) || null;
-  const completeDurations = stageEvents.length > 0 && stageEvents.every((event) => Number.isFinite(event.duration));
-  const completeTokens = stageEvents.length > 0 && stageEvents.every((event) => Number.isFinite(event.tokenTotal));
+  const durations = sumAvailable(stageEvents, "duration"), tokens = sumAvailable(stageEvents, "tokenTotal");
   const earliestStart = stageEvents.reduce((earliest, event) => {
     const parsed = parseDate(event.start);
     if (!parsed) return earliest;
@@ -670,9 +834,9 @@ function summarizeStage(events, stage) {
     events: stageEvents,
     latest,
     start: earliestStart?.value || "",
-    duration: completeDurations ? stageEvents.reduce((sum, event) => sum + event.duration, 0) : null,
-    tokens: completeTokens ? stageEvents.reduce((sum, event) => sum + event.tokenTotal, 0) : null,
-    reworkCount: stageEvents.length ? Math.max(...stageEvents.map((event) => event.reworkCount || 0)) : 0,
+    duration: durations.total, durationCoverage: durations.count,
+    tokens: tokens.total, tokenCoverage: tokens.count,
+    waitDuration: sumAvailable(stageEvents, "waitDuration").total,
   };
 }
 
@@ -915,7 +1079,7 @@ function renderTimeline(task) {
     const position = layout.positions.get(stage);
     const summary = summarizeStage(events, stage);
     const result = summary.latest?.result || "无记录";
-    const meta = summary.events.length ? `${numberFormat.format(summary.events.length)} 次 · ${formatDuration(summary.duration)}` : "暂无阶段证据";
+    const meta = summary.events.length ? `${numberFormat.format(summary.events.length)} 次 · ${recordedMetricLabel(summary.duration, summary.durationCoverage, summary.events.length, formatDuration)}` : "暂无阶段证据";
     const stageStartLabel = formatCanvasStart(summary.start);
     const stageStart = canvasStartMarkup(summary.start, "workflow-stage-summary__start", "起始");
     const attemptNodes = summary.events.map((event) => {
@@ -939,7 +1103,7 @@ function renderTimeline(task) {
     return `<path class="workflow-route is-rework" d="${route.path}" marker-end="url(#workflow-return-arrow)"/><circle class="workflow-return-origin" cx="${route.sourceX}" cy="${route.sourceY}" r="4"/><g class="workflow-return-callout"><rect x="${route.labelX - route.labelWidth / 2}" y="${route.labelY - 14}" width="${route.labelWidth}" height="28" rx="6"/><text class="workflow-return-label" x="${route.labelX}" y="${route.labelY + 4}" text-anchor="middle">${escapeHtml(route.label)}</text></g>`;
   }).join("");
   const reworkSummary = reworkTransitions.length
-    ? `<div class="workflow-return-band" aria-hidden="true"><span>返工回流</span><strong>${numberFormat.format(reworkTransitions.length)} 条</strong></div><ol class="sr-only" aria-label="返工回流记录">${reworkTransitions.map((transition) => `<li>${escapeHtml(`记录 ${String(transition.fromSequence).padStart(2, "0")} 从 ${transition.from} ${transition.fromResult} 返回 ${transition.to}，记录 ${String(transition.toSequence).padStart(2, "0")} 重新进入`)}</li>`).join("")}</ol>`
+    ? `<div class="workflow-return-band" aria-hidden="true"><span>阶段回流路径</span><strong>${numberFormat.format(reworkTransitions.length)} 条</strong></div><ol class="sr-only" aria-label="阶段回流路径，不等于返工事件数">${reworkTransitions.map((transition) => `<li>${escapeHtml(`记录 ${String(transition.fromSequence).padStart(2, "0")} 从 ${transition.from} ${transition.fromResult} 返回 ${transition.to}，记录 ${String(transition.toSequence).padStart(2, "0")} 重新进入`)}</li>`).join("")}</ol>`
     : "";
   elements.timelinePlane.dataset.width = String(layout.width);
   elements.timelinePlane.dataset.height = String(layout.height);
@@ -999,12 +1163,12 @@ function renderStageDetail(stage, events) {
     const eventIndex = events.indexOf(event);
     return `<button type="button" class="inspector-attempt" data-inspector-event-index="${eventIndex}"><span>${escapeHtml(`尝试 ${event.attempt}`)}</span><strong>${escapeHtml(`${event.result} · ${formatDuration(event.duration)}`)}</strong></button>`;
   }).join("");
-  elements.eventDetail.innerHTML = `<div class="event-detail__grid"><span>阶段<strong>${escapeHtml(`${stage} · ${STAGE_NAMES[stage]}`)}</strong></span><span>最近结果<strong>${escapeHtml(latestResult)}</strong></span><span>尝试次数<strong>${numberFormat.format(summary.events.length)}</strong></span><span>累计用时<strong>${escapeHtml(formatDuration(summary.duration))}</strong></span><span>累计 Token<strong>${escapeHtml(formatTokens(summary.tokens))}</strong></span><span>返工次数<strong>${numberFormat.format(summary.reworkCount)}</strong></span></div>${attemptRows ? `<div class="inspector-attempts"><span>尝试记录</span>${attemptRows}</div>` : '<p class="event-note">state.md、metrics.md 与阶段产物均未提供该阶段记录。</p>'}`;
+  elements.eventDetail.innerHTML = `<div class="event-detail__grid"><span>阶段<strong>${escapeHtml(`${stage} · ${STAGE_NAMES[stage]}`)}</strong></span><span>最近结果<strong>${escapeHtml(latestResult)}</strong></span><span>尝试记录<strong>${numberFormat.format(summary.events.length)}</strong></span><span>记录区间耗时<strong>${escapeHtml(recordedMetricLabel(summary.duration, summary.durationCoverage, summary.events.length, formatDuration))}</strong></span><span>记录 Token<strong>${escapeHtml(recordedMetricLabel(summary.tokens, summary.tokenCoverage, summary.events.length, formatTokens))}</strong></span><span>显式等待<strong>${escapeHtml(waitingLabel(summary.waitDuration))}</strong></span></div>${attemptRows ? `<div class="inspector-attempts"><span>尝试记录，不代表独立返工事件</span>${attemptRows}</div>` : '<p class="event-note">state.md、metrics.md 与阶段产物均未提供该阶段记录。</p>'}`;
 }
 
 function renderEventDetail(event) {
   if (!event) return;
-  elements.eventDetail.innerHTML = `<div class="event-detail__grid"><span>阶段<strong>${escapeHtml(`${event.stage} · 尝试 ${event.attempt}`)}</strong></span><span>结果<strong>${escapeHtml(event.result)}</strong></span><span>用时<strong>${escapeHtml(formatDuration(event.duration))}</strong></span><span>Token<strong title="${Number.isFinite(event.tokenTotal) ? numberFormat.format(event.tokenTotal) : "缺失"}">${escapeHtml(formatTokens(event.tokenTotal))}</strong></span><span>效率<strong>${escapeHtml(formatPercent(event.efficiency))}</strong></span><span>返工次数<strong>${numberFormat.format(event.reworkCount || 0)}</strong></span><span>开始<strong>${escapeHtml(formatDateTime(event.start))}</strong></span><span>结束<strong>${escapeHtml(formatDateTime(event.end))}</strong></span></div><p class="event-note"><strong>证据备注：</strong>${escapeHtml(event.note || "该记录没有备注。")} <span class="mono-meta">${escapeHtml(event.source || "metrics.md")}</span></p>`;
+  elements.eventDetail.innerHTML = `<div class="event-detail__grid"><span>阶段<strong>${escapeHtml(`${event.stage} · 尝试 ${event.attempt}`)}</strong></span><span>结果<strong>${escapeHtml(event.result)}</strong></span><span>记录区间耗时<strong>${escapeHtml(formatDuration(event.duration))}</strong></span><span>Token<strong title="${Number.isFinite(event.tokenTotal) ? numberFormat.format(event.tokenTotal) : "缺失"}">${escapeHtml(formatTokens(event.tokenTotal))}</strong></span><span>显式等待<strong>${escapeHtml(waitingLabel(event.waitDuration))}</strong></span><span>旧轮次数（未对齐）<strong>${Number.isFinite(event.legacyReworkCount) ? numberFormat.format(event.legacyReworkCount) : "NOT_AVAILABLE"}</strong></span><span>开始<strong>${escapeHtml(formatDateTime(event.start))}</strong></span><span>结束<strong>${escapeHtml(formatDateTime(event.end))}</strong></span></div><p class="event-note"><strong>证据备注：</strong>${escapeHtml(event.note || "该记录没有备注。")} <span class="mono-meta">${escapeHtml(event.source || "metrics.md")}</span></p>`;
 }
 
 function sumAvailable(records, field) {
@@ -1028,19 +1192,13 @@ function buildMetricModel(task) {
   const records = task.records || [];
   const tokenMetric = sumAvailable(records, "tokenTotal");
   const durationMetric = sumAvailable(records, "duration");
-  const efficiencyRecords = records.filter((record) => Number.isFinite(record.efficiency));
-  const acceptedUnits = efficiencyRecords.reduce((sum, record) => sum + (record.acceptedUnits || 0), 0);
-  const reworkUnits = efficiencyRecords.reduce((sum, record) => sum + (record.reworkUnits || 0), 0);
-  const efficiencyDenominator = acceptedUnits + reworkUnits;
+  const waitMetric = sumAvailable(records, "waitDuration");
   const rows = STAGES.map((stage) => {
     const stageRecords = records.filter((record) => record.stage === stage);
     const summary = summarizeStage(records, stage);
     const tokens = sumAvailable(stageRecords, "tokenTotal");
     const duration = sumAvailable(stageRecords, "duration");
-    const eligible = stageRecords.filter((record) => Number.isFinite(record.efficiency));
-    const stageAccepted = eligible.reduce((sum, record) => sum + (record.acceptedUnits || 0), 0);
-    const stageReworkUnits = eligible.reduce((sum, record) => sum + (record.reworkUnits || 0), 0);
-    const denominator = stageAccepted + stageReworkUnits;
+    const waiting = sumAvailable(stageRecords, "waitDuration");
     return {
       stage,
       name: STAGE_NAMES[stage],
@@ -1053,10 +1211,9 @@ function buildMetricModel(task) {
       durationCoverage: duration.count,
       tokens: tokens.total,
       tokenCoverage: tokens.count,
-      efficiency: denominator ? stageAccepted / denominator : null,
-      acceptedUnits: stageAccepted,
-      reworkUnits: stageReworkUnits,
-      reworkCount: stageRecords.length ? Math.max(...stageRecords.map((record) => record.reworkCount || 0)) : 0,
+      waitDuration: waiting.total,
+      waitCoverage: waiting.count,
+      rework: reworkSummary(task, stage),
     };
   });
   rows.forEach((row) => {
@@ -1072,10 +1229,9 @@ function buildMetricModel(task) {
     tokenCoverage: tokenMetric.count,
     durationTotal: durationMetric.total,
     durationCoverage: durationMetric.count,
-    efficiency: efficiencyDenominator ? acceptedUnits / efficiencyDenominator : null,
-    acceptedUnits,
-    reworkUnits,
-    reworkCount: records.length ? Math.max(...records.map((record) => record.reworkCount || 0)) : 0,
+    waitTotal: waitMetric.total,
+    waitCoverage: waitMetric.count,
+    rework: reworkSummary(task),
     failCount: records.filter((record) => record.result === "FAIL").length,
     blockedCount: records.filter((record) => record.result === "BLOCKED").length,
   };
@@ -1085,17 +1241,17 @@ function renderMetricKpis(model) {
   const activeStages = model.rows.filter((row) => row.attempts).length;
   const cards = [
     { label: "阶段尝试", value: numberFormat.format(model.records.length), note: `${activeStages} / ${STAGES.length} 个阶段有记录` },
-    { label: "记录用时", value: formatDuration(model.durationTotal), note: `完整度 ${model.durationCoverage} / ${model.records.length}` },
-    { label: "Token", value: formatTokens(model.tokenTotal), note: `精确值 ${model.tokenCoverage} / ${model.records.length}` },
-    { label: "过程效率", value: formatPercent(model.efficiency), note: `有效 ${numberFormat.format(model.acceptedUnits)} · 返工影响 ${numberFormat.format(model.reworkUnits)}` },
-    { label: "阶段回流", value: numberFormat.format(model.reworkCount), note: `${model.failCount} FAIL · ${model.blockedCount} BLOCKED` },
+    { label: "记录区间耗时", value: recordedMetricLabel(model.durationTotal, model.durationCoverage, model.records.length, formatDuration), note: `覆盖 ${model.durationCoverage} / ${model.records.length}；可含等待及重叠` },
+    { label: "Token", value: recordedMetricLabel(model.tokenTotal, model.tokenCoverage, model.records.length, formatTokens), note: `有数值 ${model.tokenCoverage} / ${model.records.length}；缺失未补零` },
+    { label: "显式等待", value: waitingLabel(model.waitTotal), note: `已记录 ${model.waitCoverage} / ${model.records.length}；不从间隙推算` },
+    { label: "已登记返工事件", value: eventCountLabel(model.rework), note: reworkCoverageNote(model.rework) },
   ];
   elements.metricDrilldownKpis.innerHTML = cards.map((card) => `<article><span>${escapeHtml(card.label)}</span><strong>${escapeHtml(card.value)}</strong><small>${escapeHtml(card.note)}</small></article>`).join("");
 }
 
 function renderTokenComposition(model) {
   if (!Number.isFinite(model.tokenTotal) || !model.tokenTotal) {
-    elements.tokenCompositionChart.innerHTML = '<div class="metric-empty"><strong>没有可绘制的 Token</strong><span>metrics.md 未提供精确 total。</span></div>';
+    elements.tokenCompositionChart.innerHTML = `<div class="metric-empty"><strong>${model.tokenTotal === 0 ? "已记录 Token 合计为 0" : "没有可绘制的 Token"}</strong><span>有数值 ${model.tokenCoverage} / ${model.records.length}；缺失未补零。</span></div>`;
     return;
   }
   let offset = 0;
@@ -1106,19 +1262,19 @@ function renderTokenComposition(model) {
     return markup;
   }).join("");
   const ariaSummary = model.rows.filter((row) => Number.isFinite(row.tokenShare)).map((row) => `${row.stage} ${formatPercent(row.tokenShare)}`).join("，");
-  const legend = model.rows.filter((row) => row.attempts).map((row) => `<button type="button" class="metric-legend__item" data-metric-stage="${row.stage}" aria-pressed="${state.metricStage === row.stage}"><span class="metric-swatch" aria-hidden="true"></span><span><strong>${row.stage} · ${escapeHtml(row.name)}</strong><small>${escapeHtml(formatTokens(row.tokens))}</small></span><b>${escapeHtml(formatPercent(row.tokenShare))}</b></button>`).join("");
-  elements.tokenCompositionChart.innerHTML = `<div class="token-donut"><svg viewBox="0 0 140 140" role="img" aria-label="Token 阶段构成：${escapeHtml(ariaSummary)}"><circle class="token-donut__track" cx="70" cy="70" r="52"/><g transform="rotate(-90 70 70)">${segments}</g></svg><span><small>记录 Token</small><strong>${escapeHtml(formatTokens(model.tokenTotal))}</strong></span></div><div class="metric-legend">${legend}</div>`;
+  const legend = model.rows.filter((row) => row.attempts).map((row) => `<button type="button" class="metric-legend__item" data-metric-stage="${row.stage}" aria-pressed="${state.metricStage === row.stage}"><span class="metric-swatch" aria-hidden="true"></span><span><strong>${row.stage} · ${escapeHtml(row.name)}</strong><small>${escapeHtml(recordedMetricLabel(row.tokens, row.tokenCoverage, row.attempts, formatTokens))} · ${row.tokenCoverage}/${row.attempts}</small></span><b>${escapeHtml(formatPercent(row.tokenShare))}</b></button>`).join("");
+  elements.tokenCompositionChart.innerHTML = `<div class="token-donut"><svg viewBox="0 0 140 140" role="img" aria-label="已记录 Token 阶段构成：${escapeHtml(ariaSummary)}"><circle class="token-donut__track" cx="70" cy="70" r="52"/><g transform="rotate(-90 70 70)">${segments}</g></svg><span><small>${model.tokenCoverage < model.records.length ? "Token 部分合计" : "已记录 Token"}</small><strong>${escapeHtml(formatTokens(model.tokenTotal))}</strong></span></div><div class="metric-legend">${legend}</div>`;
 }
 
 function renderDurationDistribution(model) {
   if (!Number.isFinite(model.durationTotal) || !model.durationTotal) {
-    elements.durationDistributionChart.innerHTML = '<div class="metric-empty"><strong>没有可绘制的用时</strong><span>metrics.md 未提供阶段用时。</span></div>';
+    elements.durationDistributionChart.innerHTML = `<div class="metric-empty"><strong>${model.durationTotal === 0 ? "已记录区间合计为 0 秒" : "没有可绘制的用时"}</strong><span>有数值 ${model.durationCoverage} / ${model.records.length}；缺失未补零。</span></div>`;
     return;
   }
   elements.durationDistributionChart.innerHTML = model.rows.map((row) => {
     const share = Number.isFinite(row.durationShare) ? row.durationShare : 0;
     const selected = state.metricStage === "all" || state.metricStage === row.stage;
-    return `<button type="button" class="duration-bar" data-metric-stage="${row.stage}" data-active="${selected}" aria-pressed="${state.metricStage === row.stage}" aria-label="${row.stage} ${escapeHtml(row.name)}，${escapeHtml(formatDuration(row.duration))}，占 ${escapeHtml(formatPercent(row.durationShare))}"><span class="duration-bar__label"><strong>${row.stage}</strong><small>${escapeHtml(row.name)}</small></span><span class="duration-bar__track"><i aria-hidden="true" style="--metric-share:${share * 100}%"></i></span><span class="duration-bar__value"><strong>${escapeHtml(formatDuration(row.duration))}</strong><small>${escapeHtml(formatPercent(row.durationShare))}</small></span></button>`;
+    return `<button type="button" class="duration-bar" data-metric-stage="${row.stage}" data-active="${selected}" aria-pressed="${state.metricStage === row.stage}" aria-label="${row.stage} ${escapeHtml(row.name)}，${escapeHtml(recordedMetricLabel(row.duration, row.durationCoverage, row.attempts, formatDuration))}，占已记录区间 ${escapeHtml(formatPercent(row.durationShare))}"><span class="duration-bar__label"><strong>${row.stage}</strong><small>${escapeHtml(row.name)}</small></span><span class="duration-bar__track"><i aria-hidden="true" style="--metric-share:${share * 100}%"></i></span><span class="duration-bar__value"><strong>${escapeHtml(recordedMetricLabel(row.duration, row.durationCoverage, row.attempts, formatDuration))}</strong><small>${escapeHtml(formatPercent(row.durationShare))} · ${row.durationCoverage}/${row.attempts}</small></span></button>`;
   }).join("");
 }
 
@@ -1129,21 +1285,22 @@ function renderMetricStageDetail(model) {
     const durationHotspot = model.rows.filter((row) => Number.isFinite(row.duration)).sort((a, b) => b.duration - a.duration)[0];
     elements.metricStageDetailTitle.textContent = "全部阶段";
     elements.metricStageDetailCaption.textContent = `${model.records.length} 条记录 · ${formatDateTime(model.start)} 至 ${formatDateTime(model.end)}`;
-    elements.metricStageDetailBody.innerHTML = `<div class="metric-diagnosis"><article><span>Token 集中阶段</span><strong>${tokenHotspot ? `${tokenHotspot.stage} · ${formatPercent(tokenHotspot.tokenShare)}` : "—"}</strong><small>${tokenHotspot ? escapeHtml(tokenHotspot.name) : "无可核验数据"}</small></article><article><span>耗时最长阶段</span><strong>${durationHotspot ? `${durationHotspot.stage} · ${formatPercent(durationHotspot.durationShare)}` : "—"}</strong><small>${durationHotspot ? escapeHtml(formatDuration(durationHotspot.duration)) : "无可核验数据"}</small></article><article><span>回流影响</span><strong>${numberFormat.format(model.reworkCount)} 次</strong><small>${numberFormat.format(model.reworkUnits)} 个返工影响单元</small></article></div>`;
+    elements.metricStageDetailBody.innerHTML = `<div class="metric-diagnosis"><article><span>已记录 Token 集中阶段</span><strong>${tokenHotspot ? `${tokenHotspot.stage} · ${formatPercent(tokenHotspot.tokenShare)}` : "—"}</strong><small>${tokenHotspot ? escapeHtml(tokenHotspot.name) : "无可核验数据"}</small></article><article><span>已记录区间最长阶段</span><strong>${durationHotspot ? `${durationHotspot.stage} · ${formatPercent(durationHotspot.durationShare)}` : "—"}</strong><small>${durationHotspot ? escapeHtml(formatDuration(durationHotspot.duration)) : "无可核验数据"}</small></article><article><span>已登记返工事件</span><strong>${escapeHtml(eventCountLabel(model.rework))}</strong><small>${escapeHtml(reworkCoverageNote(model.rework))}</small></article></div>`;
     return;
   }
   elements.metricStageDetailTitle.textContent = `${selected.stage} · ${selected.name}`;
   elements.metricStageDetailCaption.textContent = `${selected.attempts} 条尝试 · ${formatCanvasStart(selected.start)} 至 ${formatDateTime(selected.end)} · 最近结果 ${selected.result}`;
-  const summary = `<div class="metric-stage-summary"><span><small>记录用时</small><strong>${escapeHtml(formatDuration(selected.duration))}</strong></span><span><small>Token</small><strong>${escapeHtml(formatTokens(selected.tokens))}</strong></span><span><small>效率</small><strong>${escapeHtml(formatPercent(selected.efficiency))}</strong></span><span><small>返工</small><strong>${numberFormat.format(selected.reworkCount)}</strong></span></div>`;
-  const attempts = selected.records.length ? selected.records.map((record) => `<article class="metric-attempt" data-result="${escapeHtml(record.result)}"><header><span>${escapeHtml(`${record.stage} · 尝试 ${record.attempt}`)}</span><strong>${escapeHtml(record.result)}</strong></header><dl><div><dt>开始</dt><dd>${escapeHtml(formatCanvasStart(record.start))}</dd></div><div><dt>用时</dt><dd>${escapeHtml(formatDuration(record.duration))}</dd></div><div><dt>Token</dt><dd>${escapeHtml(formatTokens(record.tokenTotal))}</dd></div><div><dt>效率</dt><dd>${escapeHtml(formatPercent(record.efficiency))}</dd></div></dl></article>`).join("") : '<div class="metric-empty"><strong>该阶段没有 metrics.md 记录</strong><span>不使用 state.md 或阶段产物推算指标。</span></div>';
-  elements.metricStageDetailBody.innerHTML = `${summary}<div class="metric-attempts">${attempts}</div>`;
+  const summary = `<div class="metric-stage-summary"><span><small>记录区间耗时</small><strong>${escapeHtml(recordedMetricLabel(selected.duration, selected.durationCoverage, selected.attempts, formatDuration))}</strong></span><span><small>Token</small><strong>${escapeHtml(recordedMetricLabel(selected.tokens, selected.tokenCoverage, selected.attempts, formatTokens))}</strong></span><span><small>显式等待</small><strong>${escapeHtml(waitingLabel(selected.waitDuration))}</strong></span><span><small>来源阶段事件</small><strong>${escapeHtml(eventCountLabel(selected.rework))}</strong></span></div>`;
+  const attempts = selected.records.length ? selected.records.map((record) => `<article class="metric-attempt" data-result="${escapeHtml(record.result)}"><header><span>${escapeHtml(`${record.stage} · 尝试 ${record.attempt}`)}</span><strong>${escapeHtml(record.result)}</strong></header><dl><div><dt>开始</dt><dd>${escapeHtml(formatCanvasStart(record.start))}</dd></div><div><dt>区间耗时</dt><dd>${escapeHtml(formatDuration(record.duration))}</dd></div><div><dt>Token</dt><dd>${escapeHtml(formatTokens(record.tokenTotal))}</dd></div><div><dt>显式等待</dt><dd>${escapeHtml(waitingLabel(record.waitDuration))}</dd></div></dl></article>`).join("") : '<div class="metric-empty"><strong>该阶段没有 metrics.md 记录</strong><span>不使用 state.md 或阶段产物推算指标。</span></div>';
+  elements.metricStageDetailBody.innerHTML = `${summary}<p class="event-note">${escapeHtml(reworkCoverageNote(selected.rework))}</p><div class="metric-attempts">${attempts}</div>`;
 }
 
 function renderMetricStageTable(model) {
-  elements.metricStageTable.innerHTML = model.rows.map((row) => `<tr data-selected="${state.metricStage === row.stage}"><td><button type="button" class="metric-table__stage" data-metric-stage="${row.stage}" aria-pressed="${state.metricStage === row.stage}"><span class="metric-swatch" aria-hidden="true"></span><strong>${row.stage}</strong><small>${escapeHtml(row.name)}</small></button></td><td>${numberFormat.format(row.attempts)}</td><td><span class="metric-result" data-result="${escapeHtml(row.result)}">${escapeHtml(row.result)}</span></td><td><strong>${escapeHtml(formatDuration(row.duration))}</strong><small>${escapeHtml(formatPercent(row.durationShare))}</small></td><td><strong title="${Number.isFinite(row.tokens) ? numberFormat.format(row.tokens) : "缺失"}">${escapeHtml(formatTokens(row.tokens))}</strong><small>${escapeHtml(formatPercent(row.tokenShare))}</small></td><td>${escapeHtml(formatPercent(row.efficiency))}</td><td>${numberFormat.format(row.reworkCount)}</td></tr>`).join("");
+  elements.metricStageTable.innerHTML = model.rows.map((row) => `<tr data-selected="${state.metricStage === row.stage}"><td><button type="button" class="metric-table__stage" data-metric-stage="${row.stage}" aria-pressed="${state.metricStage === row.stage}"><span class="metric-swatch" aria-hidden="true"></span><strong>${row.stage}</strong><small>${escapeHtml(row.name)}</small></button></td><td>${numberFormat.format(row.attempts)}</td><td><span class="metric-result" data-result="${escapeHtml(row.result)}">${escapeHtml(row.result)}</span></td><td><strong>${escapeHtml(recordedMetricLabel(row.duration, row.durationCoverage, row.attempts, formatDuration))}</strong><small>${escapeHtml(formatPercent(row.durationShare))} · ${row.durationCoverage}/${row.attempts}</small></td><td><strong title="${Number.isFinite(row.tokens) ? numberFormat.format(row.tokens) : "缺失"}">${escapeHtml(recordedMetricLabel(row.tokens, row.tokenCoverage, row.attempts, formatTokens))}</strong><small>${escapeHtml(formatPercent(row.tokenShare))} · ${row.tokenCoverage}/${row.attempts}</small></td><td>${escapeHtml(waitingLabel(row.waitDuration))}<small>${row.waitCoverage}/${row.attempts}</small></td><td title="${escapeHtml(reworkCoverageNote(row.rework))}">${escapeHtml(eventCountLabel(row.rework))}</td></tr>`).join("");
 }
 
 function renderMetricDrilldown(task) {
+  renderEfficiencyDetail(task);
   const model = buildMetricModel(task);
   if (state.metricTaskId !== task.id) {
     state.metricTaskId = task.id;
@@ -1154,7 +1311,7 @@ function renderMetricDrilldown(task) {
   const allButton = elements.metricDrilldown.querySelector('[data-metric-stage="all"]');
   allButton.setAttribute("aria-pressed", String(state.metricStage === "all"));
   elements.metricDrilldownSource.textContent = model.records.length ? `SOURCE · metrics.md · ${model.records.length} RECORDS` : "SOURCE · metrics.md · NOT AVAILABLE";
-  elements.metricDrilldownCaption.textContent = model.records.length ? `${formatDateTime(model.start)} 至 ${formatDateTime(model.end)} · Token ${model.tokenCoverage}/${model.records.length} · 用时 ${model.durationCoverage}/${model.records.length}` : "当前需求没有可读取的 metrics.md；下方不展示推算值。";
+  elements.metricDrilldownCaption.textContent = model.records.length ? `${formatDateTime(model.start)} 至 ${formatDateTime(model.end)} · Token ${model.tokenCoverage}/${model.records.length} · 区间 ${model.durationCoverage}/${model.records.length} · 等待 ${model.waitCoverage}/${model.records.length}` : "当前需求没有可读取的阶段区间记录；事件记录单独展示。";
   renderMetricKpis(model);
   renderTokenComposition(model);
   renderDurationDistribution(model);
@@ -1179,12 +1336,16 @@ function renderDetail() {
   elements.detailContent.hidden = false;
   elements.detailId.textContent = task.id;
   elements.detailTitle.textContent = task.title;
-  elements.detailBadges.innerHTML = `<span class="badge" data-tone="${task.statusMeta.key}">${escapeHtml(task.statusMeta.label)}</span><span class="badge">${escapeHtml(task.phase || "未开始")}</span><span class="badge">${escapeHtml(task.category)}</span>${task.loadError ? '<span class="badge" data-tone="cancelled">读取不完整</span>' : ""}`;
-  elements.detailDuration.textContent = formatDuration(task.aggregate.duration);
-  elements.detailTokens.textContent = formatTokens(task.aggregate.tokens);
+  const evidenceTitle = task.lifecycle?.evidence || "尚无独立证据；生命周期不推导验收、合入或部署状态";
+  const evidenceBadges = lifecycleEvidence(task).map(({ label, value }) => `<span class="badge" title="${escapeHtml(evidenceTitle)}">${escapeHtml(label)} · ${escapeHtml(value)}</span>`).join("");
+  const issues = task.lifecycle?.issues || [];
+  elements.detailBadges.innerHTML = `<span class="badge" data-tone="${task.statusMeta.key}">${escapeHtml(task.statusMeta.label)}</span><span class="badge">${escapeHtml(task.phase || "未开始")}</span><span class="badge">${escapeHtml(task.category)}</span>${evidenceBadges}${issues.length ? `<span class="badge" data-tone="blocked" title="${escapeHtml(issues.join("；"))}">生命周期待核对</span>` : ""}${task.loadError ? '<span class="badge" data-tone="cancelled">读取不完整</span>' : ""}`;
+  elements.detailDuration.textContent = recordedMetricLabel(task.aggregate.duration, task.aggregate.durationCoverage, task.records.length, formatDuration);
+  elements.detailTokens.textContent = recordedMetricLabel(task.aggregate.tokens, task.aggregate.tokenCoverage, task.records.length, formatTokens);
   const tokenCoverage = `${task.aggregate.tokenCoverage}/${task.records.length}`;
   elements.detailTokens.title = Number.isFinite(task.aggregate.tokens) ? `${numberFormat.format(task.aggregate.tokens)}（精确记录 ${tokenCoverage}）` : "缺失";
-  elements.detailEfficiency.textContent = formatPercent(task.aggregate.efficiency);
+  elements.detailEfficiency.textContent = waitingLabel(task.aggregate.waitDuration);
+  elements.detailEfficiency.title = `显式等待覆盖 ${task.aggregate.waitCoverage}/${task.records.length}；缺失为 NOT_AVAILABLE`;
   hideInspector({ immediate: true });
   state.selectedEvent = -1;
   renderTimeline(task);
@@ -1244,7 +1405,7 @@ function switchView(view, options = {}) {
   elements.overviewView.hidden = !overview;
   elements.analysisView.hidden = overview;
   elements.viewContext.textContent = overview ? "总览" : "需求分析";
-  elements.contextTitle.textContent = overview ? "效率与需求事件" : "需求复盘与时间线";
+  elements.contextTitle.textContent = overview ? "状态与过程证据" : "需求复盘与时间线";
   document.querySelectorAll("[data-view-target]").forEach((button) => {
     const active = button.dataset.viewTarget === state.view;
     button.classList.toggle("is-active", active);
@@ -1272,7 +1433,7 @@ function selectTask(taskId, options = {}) {
 function commandOptions(query = "") {
   const normalized = query.trim().toLowerCase();
   const options = [
-    { type: "view", value: "overview", label: "总览", meta: "效率与需求事件" },
+    { type: "view", value: "overview", label: "总览", meta: "状态与过程证据" },
     { type: "view", value: "analysis", label: "需求分析", meta: "复盘与时间线" },
     ...state.tasks.map((task) => ({ type: "task", value: task.id, label: task.title, meta: `${task.id} · ${task.statusMeta.label}` })),
   ];
@@ -1462,7 +1623,12 @@ function bindEvents() {
   });
 }
 
-bindTimelineCamera();
-bindEvents();
-setDemandDrawer(true);
-loadDashboard();
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { statusMeta, lifecycleEvidence, fieldValue, parseMetricNumber, parseMetrics, parseReworkEvents, reworkSummary, eventCountLabel, reworkCoverageNote, aggregateTask, overviewMetricModel, buildMetricModel, summarizeStage, sumAvailable, recordedMetricLabel, waitingLabel, formatDuration, formatTokens, scoreValue, efficiencyScopeMarkup, efficiencyDetailMarkup, enrichTask };
+}
+if (typeof document !== "undefined") {
+  bindTimelineCamera();
+  bindEvents();
+  setDemandDrawer(true);
+  loadDashboard();
+}

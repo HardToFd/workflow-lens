@@ -8,9 +8,37 @@
   "task_id": {
     "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
     "forbid_double_dot": true,
-    "forbid_trailing": [".", "-"],
-    "forbid_suffix_case_insensitive": [".lock"],
-    "windows_reserved_stems": ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"]
+    "forbid_trailing": [
+      ".",
+      "-"
+    ],
+    "forbid_suffix_case_insensitive": [
+      ".lock"
+    ],
+    "windows_reserved_stems": [
+      "CON",
+      "PRN",
+      "AUX",
+      "NUL",
+      "COM1",
+      "COM2",
+      "COM3",
+      "COM4",
+      "COM5",
+      "COM6",
+      "COM7",
+      "COM8",
+      "COM9",
+      "LPT1",
+      "LPT2",
+      "LPT3",
+      "LPT4",
+      "LPT5",
+      "LPT6",
+      "LPT7",
+      "LPT8",
+      "LPT9"
+    ]
   },
   "metrics": {
     "document": "work/<id>/metrics.md",
@@ -18,10 +46,22 @@
     "auto_collect_on_record": true,
     "codex_source": "token_count.info.last_token_usage",
     "omp_source": "assistant usage and model_usage",
-    "runtime_priority": ["codex", "omp"],
+    "runtime_priority": [
+      "codex",
+      "omp"
+    ],
     "display_timezone": "UTC+08:00",
     "target_repository_commit": "forbidden",
-    "unknown_token_value": "NOT_AVAILABLE"
+    "unknown_token_value": "NOT_AVAILABLE",
+    "rework_document": "work/<id>/metrics.md#返工事件",
+    "legacy_rework_aggregation": "forbidden",
+    "rework_types": [
+      "defect",
+      "scope_change",
+      "baseline_adaptation",
+      "environment",
+      "workflow_migration"
+    ]
   },
   "invariants": [
     {
@@ -48,7 +88,10 @@
     },
     "B": {
       "trigger": "risk_policy",
-      "required_for": ["R2", "R3"]
+      "required_for": [
+        "R2",
+        "R3"
+      ]
     },
     "C": {
       "trigger": "merge_or_acceptance",
@@ -65,56 +108,178 @@
     "S1": {
       "name": "解析与影响面分析",
       "instruction": "workflow/stages/S1/SKILL.md",
-      "inputs": ["prds/<id>.md"],
-      "outputs": ["work/<id>/analysis.md", "work/<id>/metrics.md"],
-      "allowed_next": ["S2"],
-      "policies": ["workflow/references/metrics.md"],
-      "references": ["workflow/references/task-id.md"]
+      "inputs": [
+        "prds/<id>.md"
+      ],
+      "outputs": [
+        "work/<id>/analysis.md",
+        "work/<id>/metrics.md"
+      ],
+      "allowed_next": [
+        "S2"
+      ],
+      "policies": [
+        "workflow/references/metrics.md"
+      ],
+      "references": [
+        "workflow/references/task-id.md",
+        "workflow/references/verification-environment.md"
+      ]
     },
     "S2": {
       "name": "技术方案",
       "instruction": "workflow/stages/S2/SKILL.md",
-      "inputs": ["work/<id>/analysis.md"],
-      "outputs": ["work/<id>/plan.md", "work/<id>/metrics.md"],
-      "allowed_next": ["S1", "S3"],
-      "policies": ["workflow/references/metrics.md"],
-      "references": ["workflow/references/gates.md", "workflow/references/impact-visualization.md"]
+      "inputs": [
+        "work/<id>/analysis.md"
+      ],
+      "outputs": [
+        "work/<id>/plan.md",
+        "work/<id>/metrics.md"
+      ],
+      "allowed_next": [
+        "S1",
+        "S3"
+      ],
+      "policies": [
+        "workflow/references/metrics.md"
+      ],
+      "references": [
+        "workflow/references/gates.md",
+        "workflow/references/impact-visualization.md",
+        "workflow/references/verification-environment.md"
+      ]
     },
     "S3": {
       "name": "实现",
       "instruction": "workflow/stages/S3/SKILL.md",
-      "inputs": ["work/<id>/plan.md"],
-      "outputs": ["work/<id>/impl-log.md", "work/<id>/metrics.md"],
-      "allowed_next": ["S2", "S4"],
-      "policies": ["workflow/references/metrics.md"],
-      "references": ["workflow/references/git-safety.md", "workflow/references/worktrees.md"]
+      "inputs": [
+        "work/<id>/plan.md"
+      ],
+      "outputs": [
+        "work/<id>/impl-log.md",
+        "work/<id>/metrics.md"
+      ],
+      "allowed_next": [
+        "S2",
+        "S4"
+      ],
+      "policies": [
+        "workflow/references/metrics.md"
+      ],
+      "references": [
+        "workflow/references/git-safety.md",
+        "workflow/references/worktrees.md"
+      ]
     },
     "S4": {
       "name": "验证",
       "instruction": "workflow/stages/S4/SKILL.md",
-      "inputs": ["work/<id>/analysis.md", "work/<id>/plan.md", "work/<id>/impl-log.md"],
-      "outputs": ["work/<id>/verify.md", "work/<id>/metrics.md"],
-      "allowed_next": ["S3", "S5"],
-      "policies": ["workflow/references/metrics.md"],
-      "references": ["workflow/references/verification-results.md"]
+      "inputs": [
+        "work/<id>/analysis.md",
+        "work/<id>/plan.md",
+        "work/<id>/impl-log.md"
+      ],
+      "outputs": [
+        "work/<id>/verify.md",
+        "work/<id>/metrics.md"
+      ],
+      "allowed_next": [
+        "S3",
+        "S5"
+      ],
+      "policies": [
+        "workflow/references/metrics.md"
+      ],
+      "references": [
+        "workflow/references/verification-results.md",
+        "workflow/references/verification-environment.md"
+      ]
     },
     "S5": {
       "name": "交付",
       "instruction": "workflow/stages/S5/SKILL.md",
-      "inputs": ["work/<id>/verify.md"],
-      "outputs": ["work/<id>/delivery.md", "work/<id>/metrics.md"],
-      "allowed_next": ["S3", "S6"],
-      "policies": ["workflow/references/metrics.md"],
-      "references": ["workflow/references/gates.md", "workflow/references/git-safety.md"]
+      "inputs": [
+        "work/<id>/verify.md"
+      ],
+      "outputs": [
+        "work/<id>/delivery.md",
+        "work/<id>/metrics.md"
+      ],
+      "allowed_next": [
+        "S3",
+        "S6"
+      ],
+      "policies": [
+        "workflow/references/metrics.md"
+      ],
+      "references": [
+        "workflow/references/gates.md",
+        "workflow/references/git-safety.md"
+      ]
     },
     "S6": {
       "name": "归档",
       "instruction": "workflow/stages/S6/SKILL.md",
-      "inputs": ["work/<id>/delivery.md"],
-      "outputs": ["work/<id>/state.md", "work/<id>/metrics.md"],
+      "inputs": [
+        "work/<id>/delivery.md"
+      ],
+      "outputs": [
+        "work/<id>/state.md",
+        "work/<id>/metrics.md"
+      ],
       "allowed_next": [],
-      "policies": ["workflow/references/metrics.md"],
-      "references": ["workflow/references/artifact-retention.md", "workflow/references/worktrees.md"]
+      "policies": [
+        "workflow/references/metrics.md"
+      ],
+      "references": [
+        "workflow/references/artifact-retention.md",
+        "workflow/references/worktrees.md"
+      ]
     }
+  },
+  "lifecycle": {
+    "state": [
+      "ACTIVE",
+      "BLOCKED",
+      "WAITING",
+      "ARCHIVED",
+      "CANCELLED"
+    ],
+    "closure_reason": [
+      "ACCEPTED_NO_MR",
+      "MERGED",
+      "CANCELLED",
+      "NONE",
+      "UNKNOWN"
+    ],
+    "delivery_form": [
+      "BRANCH",
+      "PATCH",
+      "LOCAL",
+      "MIXED",
+      "NONE",
+      "UNKNOWN"
+    ],
+    "acceptance": [
+      "PASS",
+      "NOT_RUN",
+      "UNKNOWN"
+    ],
+    "merge": [
+      "MERGED",
+      "NOT_MERGED",
+      "UNKNOWN"
+    ],
+    "deployment": [
+      "VERIFIED",
+      "NOT_RUN",
+      "UNKNOWN"
+    ],
+    "cleanup": [
+      "COMPLETE",
+      "PENDING",
+      "RETAINED",
+      "UNKNOWN"
+    ]
   }
 }

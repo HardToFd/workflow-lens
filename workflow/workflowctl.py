@@ -2,6 +2,7 @@
 """Inspect and validate the workflow without loading the complete documentation set."""
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -11,6 +12,10 @@ from typing import Any, Dict, List, Optional
 
 try:
     from .core import MANIFEST, STAGES, can_transition, stage_definition, validate_task_id
+    from .delivery import check_delivery, record_delivery
+    from .lifecycle import read_lifecycle
+    from .rework import check_rework, record_rework
+    from .metrics_store import metrics_lock
     from .token_usage import (
         collect_runtime_usage,
         current_codex_session_ids,
@@ -19,6 +24,10 @@ try:
     )
 except ImportError:
     from core import MANIFEST, STAGES, can_transition, stage_definition, validate_task_id
+    from delivery import check_delivery, record_delivery
+    from lifecycle import read_lifecycle
+    from rework import check_rework, record_rework
+    from metrics_store import metrics_lock
     from token_usage import (
         collect_runtime_usage,
         current_codex_session_ids,
@@ -30,7 +39,7 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 TOP_FIELD_RE = re.compile(r"^- (?P<label>环节|状态|闸口A|闸口B|NOT_RUN 确认):\s*(?P<value>.*)$")
 METRIC_SECTION_RE = re.compile(
-    r"(?ms)^## (?P<stage>S[1-6]) · 尝试 (?P<attempt>\d+)\n(?P<body>.*?)(?=^## S[1-6] · 尝试 \d+\n|\Z)"
+    r"(?ms)^## (?P<stage>S[1-6]) · 尝试 (?P<attempt>\d+)\n(?P<body>.*?)(?=^## |\Z)"
 )
 METRIC_OUTCOMES = ("PASS", "FAIL", "NOT_RUN", "BLOCKED", "CANCELLED")
 METRIC_TIMEZONE = timezone(timedelta(hours=8))
@@ -38,6 +47,13 @@ METRIC_TIMEZONE = timezone(timedelta(hours=8))
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _markdown_value(value: Any) -> str:
+    text = str(value or "").strip()
+    # 历史状态表允许整格使用 Markdown 代码样式；它不是项目注册名的一部分。
+    quoted = re.fullmatch(r"(`+)(.*?)\1", text)
+    return quoted.group(2).strip() if quoted else text
 
 
 def parse_state(path: Path) -> Dict[str, Any]:
@@ -49,16 +65,21 @@ def parse_state(path: Path) -> Dict[str, Any]:
     result = {}  # type: Dict[str, Any]
     projects = []  # type: List[Dict[str, str]]
     headers = []  # type: List[str]
+    in_top = True
     for raw in _read_text(path).splitlines():
+        if raw.startswith("## "):
+            in_top = False
         match = TOP_FIELD_RE.match(raw)
-        if match:
-            result[match.group("label")] = match.group("value").strip()
+        if match and in_top:
+            result[match.group("label")] = _markdown_value(match.group("value"))
         stripped = raw.strip()
         if not (stripped.startswith("|") and stripped.endswith("|")):
+            headers = []
             continue
-        cells = [cell.strip() for cell in stripped[1:-1].split("|")]
-        if "项目" in cells and "阶段" in cells and "行状态" in cells:
-            headers = cells
+        cells = [_markdown_value(cell) for cell in stripped[1:-1].split("|")]
+        if "项目" in cells and "阶段" in cells and ("行状态" in cells or "状态" in cells):
+            # 旧需求使用“状态”列，与顶层状态分开，统一提供项目行状态。
+            headers = ["行状态" if cell == "状态" else cell for cell in cells]
             continue
         if headers and len(cells) == len(headers) and not all(set(cell) <= set("-:") for cell in cells):
             projects.append(dict(zip(headers, cells)))
@@ -75,6 +96,80 @@ def state_for(task_id: str, root: Path) -> Dict[str, Any]:
             state["_path"] = str(path.relative_to(root)).replace("\\", "/")
             return state
     return {"环节": "S1", "状态": "未初始化", "projects": [], "_path": None}
+
+
+def _project_name(row: Dict[str, Any]) -> str:
+    name = _markdown_value(row.get("project") or row.get("项目"))
+    if not name or any(ord(character) < 32 for character in name):
+        raise ValueError("project state row has an invalid name")
+    return name
+
+
+def _route_status(value: Any) -> str:
+    text = _markdown_value(value)
+    if re.match(r"^(?:BLOCKED\b|阻塞|挂起)", text, re.IGNORECASE):
+        return "BLOCKED"
+    if re.match(r"^(?:等待|WAITING\b)", text, re.IGNORECASE):
+        return "WAITING"
+    if re.match(r"^(?:(?:已完成|完成|已归档|已验收|只读验证完成)(?:$|[（(，,；;。.:：])|COMPLETE(?:D)?\b|ARCHIVED\b)", text, re.IGNORECASE):
+        return "COMPLETE"
+    return "READY"
+
+
+def select_route(state: Dict[str, Any], project: Optional[str] = None) -> Dict[str, Any]:
+    """Select one executable project, or expose the requirement's actual waiting state."""
+    top_stage = _markdown_value(state.get("stage") or state.get("环节") or "S1")
+    if top_stage not in STAGES:
+        raise ValueError("state contains unknown stage: " + top_stage)
+    top_status = state.get("状态") or state.get("status") or "进行中"
+    if top_stage in ("S1", "S2"):
+        if project is not None:
+            raise ValueError("S1/S2 are requirement-level stages; omit --project")
+        status = _route_status(top_status)
+        return {"stage": top_stage, "project": None, "state": top_status,
+                "runnable": status == "READY", "route_status": status}
+    rows = state.get("projects", [])
+    if not rows:
+        raise ValueError("state has no project rows after S1; complete the project state table")
+    routes = []
+    names = set()
+    for row in rows:
+        name = _project_name(row)
+        if name in names:
+            raise ValueError("duplicate project state row: " + name)
+        names.add(name)
+        stage = _markdown_value(row.get("stage") or row.get("phase") or row.get("阶段") or top_stage)
+        if stage not in STAGES:
+            raise ValueError("project contains unknown stage: " + name + ": " + stage)
+        if stage in ("S1", "S2"):
+            raise ValueError("project returned to a requirement-level stage; update the task stage before continuing")
+        row_state = row.get("row_status") or row.get("行状态") or row.get("状态") or top_status
+        status = _route_status(row_state)
+        if stage == "S6" and _route_status(top_status) == "COMPLETE" and status == "READY":
+            status = "COMPLETE"
+        routes.append({"stage": stage, "project": name, "state": row_state,
+                       "runnable": status == "READY", "route_status": status})
+    if any(route["stage"] != "S6" and route["route_status"] != "COMPLETE" for route in routes):
+        for route in routes:
+            if route["stage"] == "S6" and route["runnable"]:
+                route.update(runnable=False, route_status="WAITING", state="等待其他项目完成交付后统一归档")
+    if project is not None:
+        selected_name = _markdown_value(project)
+        selected = next((route for route in routes if route["project"] == selected_name), None)
+        if selected is None:
+            raise ValueError("project is not declared in this task: " + selected_name)
+        return selected
+    ready = [route for route in routes if route["runnable"]]
+    if ready:
+        return min(ready, key=lambda route: STAGES.index(route["stage"]))
+    status = "BLOCKED" if any(route["route_status"] == "BLOCKED" for route in routes) else (
+        "WAITING" if any(route["route_status"] == "WAITING" for route in routes) else "COMPLETE"
+    )
+    # S6 即使全部完成也保留归档上下文，供核对待人工清理的项目资源。
+    archive = all(route["stage"] == "S6" for route in routes)
+    return {"stage": "S6" if archive else None, "project": None,
+            "state": {"BLOCKED": "BLOCKED", "WAITING": "等待闸口", "COMPLETE": "完成"}[status],
+            "runnable": False, "route_status": status}
 
 
 def _artifact(root: Path, task_id: str, template: str) -> str:
@@ -122,7 +217,7 @@ def _metrics_path(root: Path, task_id: str) -> Path:
 
 
 def _metrics_template(task_id: str) -> str:
-    return """# 需求过程效率度量：{task_id}
+    return """# 需求过程度量：{task_id}
 
 > 本文件仅属于 `work/{task_id}/` 过程产物，不得加入任何目标项目的需求分支、commit、MR/PR 或正式变更文档。
 
@@ -130,28 +225,74 @@ def _metrics_template(task_id: str) -> str:
 
 - 开始和结束时间统一显示为 UTC+8 的 ISO 8601 时间（`+08:00`），实际时刻和墙钟用时不变。
 - 有效 Codex session id 优先从 `token_count.info.last_token_usage` 自动采集并去重；否则 OMP 从当前主 session 及其嵌套 agent 的 assistant `usage` / `model_usage` 按阶段窗口汇总。其他环境可显式传入精确值。`cached input` 是 input 的子集，`reasoning` 是 output 的子集，总量不得重复相加。取不到精确值时写 `NOT_AVAILABLE`，不得用 0 冒充。
-- 返工次数只统计阶段重新进入：Gate B 打回、S4 FAIL 回 S3、Gate C 评审回流或实质偏离退回 S2；同一轮内的小修不计。
-- 效率比 = 有效产出单元 /（有效产出单元 + 返工影响单元）；分母为 0 时写 `N/A`。单元定义按阶段产物中的验收项、改动项或验证项计数。
-- 用时为本阶段 `metrics-start` 至本次阶段退出的墙钟时间，阻塞和取消也必须留记录。
+- 回流用 `rework-record` 登记唯一事件及类型/回路/验收证据；同一事件经过多个阶段不重复计数，只有实现缺陷的 S4→S3 事件计入 L1。
+- 旧返工次数、产出/返工单元和效率比仅作兼容字段，不对阶段数字取 max 或求和推断事件数，不将单元比作为质量或效率排名。
+- 用时是 `metrics-start` 至阶段退出的墙钟区间，含等待；并行区间可能重叠，合计不等于需求历时/人工工时。有证据时填写等待秒数，否则 NOT_AVAILABLE；缺失时间和 Token 均不按零汇总。
 
 ## 阶段记录
 
 """.format(task_id=task_id)
 
 
-def _metric_marker_path(root: Path, task_id: str, stage: str) -> Path:
-    return root / "work" / task_id / "scratch" / "metrics" / (stage + "-active.json")
+def _metric_marker_path(root: Path, task_id: str, stage: str, project: Optional[str] = None) -> Path:
+    # 项目名只作为精确身份参与摘要，不作为路径片段，避免名称导致目录穿越或平台差异。
+    suffix = "-" + hashlib.sha256(project.encode("utf-8")).hexdigest()[:20] if project else ""
+    return root / "work" / task_id / "scratch" / "metrics" / (stage + suffix + "-active.json")
 
 
-def _unfinished_metric_stages(root: Path, task_id: str, current_stage: str) -> List[str]:
+def _active_metric_markers(root: Path, task_id: str):
     directory = root / "work" / task_id / "scratch" / "metrics"
     if not directory.is_dir():
         return []
-    return sorted(
-        path.name[: -len("-active.json")]
-        for path in directory.glob("*-active.json")
-        if path.name != current_stage + "-active.json"
-    )
+    result = []
+    for path in sorted(directory.glob("*-active.json")):
+        active = json.loads(_read_text(path))
+        if not isinstance(active, dict) or active.get("schema_version") != 1 or active.get("stage") not in STAGES:
+            raise ValueError("invalid active metrics marker: " + path.name)
+        result.append((path, active))
+    return result
+
+
+def _unfinished_metric_stages(root: Path, task_id: str, current_stage: str, project: Optional[str] = None) -> List[str]:
+    current = _metric_marker_path(root, task_id, current_stage, project)
+    return [active["stage"] for path, active in _active_metric_markers(root, task_id)
+            if path != current and (project is None or active.get("project") in (None, project))]
+
+
+def _metrics_route(task_id: str, root: Path, stage: Optional[str], project: Optional[str], starting: bool):
+    if stage is not None and stage not in STAGES:
+        raise ValueError("unknown stage: " + str(stage))
+    state = state_for(task_id, root)
+    rows = state.get("projects", [])
+    # 旧多项目计时没有归属信息，只允许明确指定阶段按原需求级记录关闭，不猜测项目。
+    if not starting and project is None and stage and _metric_marker_path(root, task_id, stage).is_file():
+        return stage, None, _metric_marker_path(root, task_id, stage)
+    route = select_route(state, project)
+    if not starting and route["project"] is None and len(rows) == 1 and route["stage"] not in ("S1", "S2"):
+        route = select_route(state, _project_name(rows[0]))
+    selected_stage = stage or route["stage"]
+    if selected_stage not in STAGES:
+        raise ValueError("no executable project; use --project and --stage to close its active metrics")
+    if starting and (selected_stage != route["stage"] or not route["runnable"]):
+        raise ValueError("metrics-start must match an executable project stage; route is " + route["route_status"])
+    if not starting and project is None:
+        active_projects = {active.get("project") for _, active in _active_metric_markers(root, task_id) if active.get("project")}
+        if len(active_projects) > 1:
+            raise ValueError("multiple projects have active metrics; specify --project")
+    selected_project = route["project"]
+    marker = _metric_marker_path(root, task_id, selected_stage, selected_project)
+    legacy = _metric_marker_path(root, task_id, selected_stage)
+    if selected_project and not marker.is_file() and legacy.is_file() and len(rows) == 1:
+        if starting:
+            active = json.loads(_read_text(legacy))
+            if not isinstance(active, dict) or active.get("schema_version") != 1 or active.get("stage") != selected_stage or active.get("project"):
+                raise ValueError("invalid legacy metrics marker")
+            active["project"] = selected_project
+            _atomic_write_text(marker, json.dumps(active, ensure_ascii=False, indent=2) + "\n")
+            legacy.unlink()
+        else:
+            return selected_stage, None, legacy
+    return selected_stage, selected_project, marker
 
 
 def _merge_unique(*groups: Optional[List[str]]) -> List[str]:
@@ -163,17 +304,37 @@ def _merge_unique(*groups: Optional[List[str]]) -> List[str]:
     return result
 
 
-def _start_stage_metrics(root: Path, task_id: str, stage: str, started_at: str) -> Dict[str, Any]:
+def _mark_shared_metric_sessions(root: Path, task_id: str, stage: str, project: Optional[str]) -> bool:
+    marker = _metric_marker_path(root, task_id, stage, project)
+    current = json.loads(_read_text(marker))
+    for other_path, other in _active_metric_markers(root, task_id):
+        if other_path == marker or other.get("project") == project:
+            continue
+        overlaps = any(set(current.get(key, [])) & set(other.get(key, []))
+                       for key in ("codex_session_ids", "omp_session_files"))
+        if overlaps:
+            # 采集源只精确到 session；重叠项目共享同一源时无法把 Token 可靠分摊到项目。
+            current["shared_session_overlap"] = True
+            other["shared_session_overlap"] = True
+            _atomic_write_text(other_path, json.dumps(other, ensure_ascii=False, indent=2) + "\n")
+    if current.get("shared_session_overlap"):
+        _atomic_write_text(marker, json.dumps(current, ensure_ascii=False, indent=2) + "\n")
+    return bool(current.get("shared_session_overlap"))
+
+
+def _start_stage_metrics(root: Path, task_id: str, stage: str, started_at: str, project: Optional[str] = None) -> Dict[str, Any]:
     document = _metrics_path(root, task_id)
     if not document.is_file():
         _atomic_write_text(document, _metrics_template(task_id))
-    marker = _metric_marker_path(root, task_id, stage)
+    marker = _metric_marker_path(root, task_id, stage, project)
     current_codex_sessions = current_codex_session_ids()
     current_omp_sessions = [] if current_codex_sessions else current_omp_session_files(
         command_hints=["metrics-start", task_id]
     )
     if marker.is_file():
         active = json.loads(_read_text(marker))
+        if active.get("stage") != stage or active.get("project") != project:
+            raise ValueError("active metrics marker belongs to another project or stage")
         normalized_started_at = _normalize_metric_timestamp(active["started_at"])
         marker_changed = normalized_started_at != active["started_at"]
         active["started_at"] = normalized_started_at
@@ -190,15 +351,18 @@ def _start_stage_metrics(root: Path, task_id: str, stage: str, started_at: str) 
         return {
             "status": "ALREADY_RUNNING",
             "stage": stage,
+            "project": project,
             "attempt": active.get("attempt"),
             "codex_session_count": len(tracked_codex_sessions),
             "omp_session_count": len(tracked_omp_sessions),
         }
-    attempts = len(re.findall(r"^## " + re.escape(stage) + r" · 尝试 \d+$", _read_text(document), re.MULTILINE))
+    attempts = [int(value) for value in re.findall(r"^## " + re.escape(stage) + r" · 尝试 (\d+)$", _read_text(document), re.MULTILINE)]
+    attempts.extend(active["attempt"] for _, active in _active_metric_markers(root, task_id) if active["stage"] == stage)
     active = {
         "schema_version": 1,
         "stage": stage,
-        "attempt": attempts + 1,
+        "project": project,
+        "attempt": max(attempts, default=0) + 1,
         "started_at": started_at,
         "codex_session_ids": current_codex_sessions,
         "omp_session_files": current_omp_sessions,
@@ -207,6 +371,7 @@ def _start_stage_metrics(root: Path, task_id: str, stage: str, started_at: str) 
     return {
         "status": "STARTED",
         "stage": stage,
+        "project": project,
         "attempt": active["attempt"],
         "started_at": started_at,
         "codex_session_count": len(current_codex_sessions),
@@ -219,20 +384,19 @@ def start_stage_metrics(
     root: Path,
     stage: Optional[str],
     started_at: Optional[str],
+    project: Optional[str] = None,
 ) -> Dict[str, Any]:
     valid, reason = validate_task_id(task_id)
     if not valid:
         raise ValueError(reason)
-    state = state_for(task_id, root)
-    current_stage = state.get("stage") or state.get("环节") or "S1"
-    selected_stage = stage or current_stage
-    if selected_stage not in STAGES:
-        raise ValueError("unknown stage: " + str(selected_stage))
-    unfinished = _unfinished_metric_stages(root, task_id, selected_stage)
-    if unfinished:
-        raise ValueError("previous stage metrics are unfinished: " + ", ".join(unfinished))
-    metric_started_at = _normalize_metric_timestamp(started_at) if started_at else _metric_now()
-    result = _start_stage_metrics(root, task_id, selected_stage, metric_started_at)
+    with metrics_lock(root / "work" / task_id):
+        selected_stage, selected_project, _ = _metrics_route(task_id, root, stage, project, starting=True)
+        unfinished = _unfinished_metric_stages(root, task_id, selected_stage, selected_project)
+        if unfinished:
+            raise ValueError("previous stage metrics are unfinished: " + ", ".join(unfinished))
+        metric_started_at = _normalize_metric_timestamp(started_at) if started_at else _metric_now()
+        result = _start_stage_metrics(root, task_id, selected_stage, metric_started_at, selected_project)
+        result["shared_session_overlap"] = _mark_shared_metric_sessions(root, task_id, selected_stage, selected_project)
     result.update({"ok": True, "task_id": task_id})
     return result
 
@@ -308,14 +472,12 @@ def record_stage_metrics(
     codex_home: Optional[Path] = None,
     omp_session_files: Optional[List[str]] = None,
     omp_agent_dir: Optional[Path] = None,
+    project: Optional[str] = None,
+    waiting_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     valid, reason = validate_task_id(task_id)
     if not valid:
         raise ValueError(reason)
-    current_stage = state_for(task_id, root).get("stage") or state_for(task_id, root).get("环节") or "S1"
-    selected_stage = stage or current_stage
-    if selected_stage not in STAGES:
-        raise ValueError("unknown stage: " + str(selected_stage))
     if outcome not in METRIC_OUTCOMES:
         raise ValueError("outcome must be one of " + ", ".join(METRIC_OUTCOMES))
     values = {
@@ -329,20 +491,26 @@ def record_stage_metrics(
     }
     _nonnegative(rework_count, "rework_count")
     _validate_token_values(values, token_source)
-    marker = _metric_marker_path(root, task_id, selected_stage)
-    if not marker.is_file():
-        raise ValueError("no active metrics marker for " + selected_stage + "; run metrics-start first")
-    active = json.loads(_read_text(marker))
-    if active.get("schema_version") != 1 or active.get("stage") != selected_stage:
-        raise ValueError("invalid active metrics marker for " + selected_stage)
+    with metrics_lock(root / "work" / task_id):
+        selected_stage, selected_project, marker = _metrics_route(task_id, root, stage, project, starting=False)
+        if not marker.is_file():
+            raise ValueError("no active metrics marker for " + selected_stage + "; run metrics-start first for this project")
+        marker_original = _read_text(marker)
+        active = json.loads(marker_original)
+        if active.get("schema_version") != 1 or active.get("stage") != selected_stage or active.get("project") != selected_project:
+            raise ValueError("invalid active metrics marker for this project and stage")
     ended_at = _metric_now()
     elapsed_seconds = max(0, int((_parse_utc(ended_at) - _parse_utc(active["started_at"])).total_seconds()))
+    if waiting_seconds is not None and (type(waiting_seconds) is not int or not 0 <= waiting_seconds <= elapsed_seconds):
+        raise ValueError("waiting_seconds must be an integer between 0 and elapsed_seconds")
     explicit_tokens = any(
         values[key] is not None
         for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "total_tokens")
     )
     token_collection = None
-    if auto_tokens and not explicit_tokens:
+    if auto_tokens and not explicit_tokens and active.get("shared_session_overlap"):
+        token_source = "NOT_AVAILABLE: overlapping project timers share the same session"
+    elif auto_tokens and not explicit_tokens:
         if omp_session_files is not None and not codex_session_ids:
             selected_codex_sessions = []
         else:
@@ -383,10 +551,12 @@ def record_stage_metrics(
     clean_note = (note or "无").replace("\r", " ").replace("\n", " ").strip() or "无"
     section = """## {stage} · 尝试 {attempt}
 
+- 项目：`{project}`
 - 结果：`{outcome}`
 - 开始：`{started_at}`
 - 结束：`{ended_at}`
 - 用时：`{elapsed_seconds}` 秒
+- 等待秒数：`{waiting_seconds}`
 - Token 来源：`{token_source}`
 - Token：`{token_text}`
 - 返工次数：`{rework_count}`
@@ -397,11 +567,13 @@ def record_stage_metrics(
 
 """.format(
         stage=selected_stage,
+        project=selected_project or "需求级",
         attempt=active["attempt"],
         outcome=outcome,
         started_at=active["started_at"],
         ended_at=ended_at,
         elapsed_seconds=elapsed_seconds,
+        waiting_seconds="NOT_AVAILABLE" if waiting_seconds is None else waiting_seconds,
         token_source=token_source or "NOT_AVAILABLE",
         token_text=token_text,
         rework_count=rework_count,
@@ -411,16 +583,24 @@ def record_stage_metrics(
         note=clean_note,
     )
     document = _metrics_path(root, task_id)
-    content = _read_text(document) if document.is_file() else _metrics_template(task_id)
-    _atomic_write_text(document, content.rstrip() + "\n\n" + section)
-    marker.unlink()
+    # Token 收集在锁外进行；追加时再次核对 marker，避免并发关闭同一计时或覆盖另一项目记录。
+    with metrics_lock(root / "work" / task_id):
+        if not marker.is_file() or _read_text(marker) != marker_original:
+            raise ValueError("active metrics marker changed while recording; retry with the intended --project")
+        content = _read_text(document) if document.is_file() else _metrics_template(task_id)
+        if re.search(r"^## " + re.escape(selected_stage) + " · 尝试 " + str(active["attempt"]) + "$", content, re.MULTILINE):
+            raise ValueError("this metrics attempt is already recorded; inspect its remaining marker")
+        _atomic_write_text(document, content.rstrip() + "\n\n" + section)
+        marker.unlink()
     return {
         "ok": True,
         "task_id": task_id,
         "stage": selected_stage,
+        "project": selected_project,
         "attempt": active["attempt"],
         "outcome": outcome,
         "elapsed_seconds": elapsed_seconds,
+        "waiting_seconds": waiting_seconds,
         "efficiency": efficiency,
         "token_source": token_source or "NOT_AVAILABLE",
         "tokens": {
@@ -527,7 +707,10 @@ def backfill_stage_metrics(
     content = _read_text(document)
     updated_content = METRIC_SECTION_RE.sub(replace_section, content)
     if changed and not dry_run:
-        _atomic_write_text(document, updated_content)
+        with metrics_lock(root / "work" / task_id):
+            if _read_text(document) != content:
+                raise ValueError("metrics document changed during backfill; retry without overwriting newer records")
+            _atomic_write_text(document, updated_content)
     return {
         "ok": True,
         "task_id": task_id,
@@ -549,11 +732,21 @@ def _project_context_files(root: Path, state: Dict[str, Any], stage: str) -> Lis
     index = json.loads(_read_text(index_path))
     entries = {item["name"]: item for item in index.get("projects", []) if isinstance(item, dict) and "name" in item}
     selected = []
-    for project in state.get("projects", []):
-        name = project.get("project") or project.get("项目")
-        if name and name in entries:
+    projects = state.get("projects", [])
+    if not projects:
+        raise ValueError("state has no project rows after S1; complete the project state table")
+    for project in projects:
+        name = _markdown_value(project.get("project") or project.get("项目"))
+        if name in entries:
             selected.append(entries[name]["detail"])
-    return list(dict.fromkeys(selected)) or [relative_index]
+            continue
+        # 工作流维护需求以自身目录为目标，不要求伪造一个业务项目注册项。
+        directory = _markdown_value(project.get("workdir") or project.get("工作目录"))
+        if name == root.resolve().name and directory and (root / directory).resolve() == root.resolve():
+            selected.append("AGENTS.md")
+            continue
+        raise ValueError("unregistered project in state: " + (name or "<missing name>"))
+    return list(dict.fromkeys(selected))
 
 
 def _extension_context_files(root: Path, project_files: List[str], stage: str) -> List[str]:
@@ -577,25 +770,28 @@ def _extension_context_files(root: Path, project_files: List[str], stage: str) -
     return list(dict.fromkeys(result))
 
 
-def context(task_id: str, root: Path) -> Dict[str, Any]:
+def context(task_id: str, root: Path, project: Optional[str] = None) -> Dict[str, Any]:
     valid, reason = validate_task_id(task_id)
     if not valid:
         raise ValueError(reason)
     state = state_for(task_id, root)
-    stage = state.get("stage") or state.get("环节") or "S1"
-    if stage not in STAGES:
-        raise ValueError("state contains unknown stage: " + str(stage))
-    definition = stage_definition(stage)
+    route = select_route(state, project)
+    stage = route["stage"]
+    definition = stage_definition(stage) if stage else {}
     required = [state["_path"]] if state.get("_path") else []
-    required.append(definition["instruction"])
-    required.extend(_artifact(root, task_id, item) for item in definition["inputs"])
+    if stage:
+        required.append(definition["instruction"])
+    required.extend(_artifact(root, task_id, item) for item in definition.get("inputs", []))
     required.extend(definition.get("policies", []))
     project_files = []
-    if stage in ("S1", "S2", "S3", "S4", "S5"):
+    if stage:
         project_files = _project_context_files(root, state, stage)
+        if route["project"] is not None:
+            selected_state = dict(state, projects=[row for row in state["projects"] if _project_name(row) == route["project"]])
+            project_files = _project_context_files(root, selected_state, stage)
         required.extend(project_files)
         required.extend(_extension_context_files(root, project_files, stage))
-    required.extend(_enabled_stage_skills(root, stage))
+        required.extend(_enabled_stage_skills(root, stage))
     required = list(dict.fromkeys(item for item in required if item))
     references = list(definition.get("references", []))
     existing = []
@@ -615,14 +811,22 @@ def context(task_id: str, root: Path) -> Dict[str, Any]:
     return {
         "task_id": task_id,
         "stage": stage,
-        "stage_name": definition["name"],
-        "state": state.get("状态") or state.get("status"),
+        "stage_name": definition.get("name"),
+        "project": route["project"],
+        "runnable": route["runnable"],
+        "route_status": route["route_status"],
+        "state": route["state"],
         "required": existing,
         "missing": missing,
         "references_on_demand": references,
         "estimated_guidance_characters": guidance_characters,
         "estimated_total_file_characters": total_characters,
         "stage_budget_characters": MANIFEST["context_budgets"]["stage_instruction_characters"],
+        "delivery": check_delivery(task_id, root, state),
+        "lifecycle": read_lifecycle(
+            _read_text(root / state["_path"]) if state.get("_path") else "",
+            state.get("stage") or state.get("环节"), state.get("status") or state.get("状态"),
+        ),
     }
 
 
@@ -738,12 +942,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     validate.add_argument("task_id")
     show = sub.add_parser("context")
     show.add_argument("task_id")
+    show.add_argument("--project", help="精确选择项目；默认选择最早可执行项目")
+    rework_check = sub.add_parser("rework-check")
+    rework_check.add_argument("task_id")
+    rework = sub.add_parser("rework-record")
+    rework.add_argument("task_id")
+    rework.add_argument("--event-id", required=True)
+    rework.add_argument("--type", required=True, choices=MANIFEST["metrics"]["rework_types"])
+    rework.add_argument("--loop", required=True, choices=("L1", "L2", "L3", "NONE"))
+    rework.add_argument("--project", required=True)
+    rework.add_argument("--from-stage", required=True, choices=STAGES)
+    rework.add_argument("--to-stage", required=True, choices=STAGES)
+    rework.add_argument("--occurred-at", required=True, help="带时区事件时间，未知用 NOT_AVAILABLE")
+    rework.add_argument("--reason", required=True)
+    rework.add_argument("--acceptance", required=True)
+    rework.add_argument("--evidence", required=True)
+    for command in ("delivery-check", "delivery-record"):
+        delivery = sub.add_parser(command)
+        delivery.add_argument("task_id")
     metric_start = sub.add_parser("metrics-start")
     metric_start.add_argument("task_id")
+    metric_start.add_argument("--project", help="项目计时归属；须与 context 的目标一致")
     metric_start.add_argument("--stage", choices=STAGES)
     metric_start.add_argument("--started-at", help="阶段开始时记录的带时区 ISO 时间")
     metric = sub.add_parser("metrics-record")
     metric.add_argument("task_id")
+    metric.add_argument("--project", help="关闭该项目的计时；并行项目必须明确指定")
     metric.add_argument("--stage", choices=STAGES)
     metric.add_argument("--outcome", required=True, choices=METRIC_OUTCOMES)
     metric.add_argument("--input-tokens", type=int)
@@ -757,10 +981,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     metric.add_argument("--omp-session-file", action="append", help="显式指定 OMP 主 session JSONL，可重复")
     metric.add_argument("--omp-agent-dir", help="OMP agent 数据目录，默认使用 PI_CODING_AGENT_DIR 或当前用户 .omp/agent")
     metric.add_argument("--no-auto-tokens", action="store_true", help="禁用本次 session Token 自动采集")
-    metric.add_argument("--rework-count", type=int, default=0)
+    metric.add_argument("--rework-count", type=int, default=0, help="旧记录兼容字段；新回流使用 rework-record")
     metric.add_argument("--accepted-units", type=int)
     metric.add_argument("--rework-units", type=int)
     metric.add_argument("--note")
+    metric.add_argument("--waiting-seconds", type=int, help="已知等待秒数，不得超过本轮墙钟用时")
     backfill = sub.add_parser("metrics-backfill")
     backfill.add_argument("task_id")
     backfill.add_argument("--stage", action="append", choices=STAGES, help="只回填指定阶段，可重复")
@@ -783,11 +1008,39 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0 if valid else 2
         if args.command == "context":
-            payload = context(args.task_id, root)
+            payload = context(args.task_id, root, args.project)
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "rework-check":
+            payload = check_rework(args.task_id, root)
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 2 if payload["status"] == "INVALID" else 0
+        if args.command == "rework-record":
+            valid, reason = validate_task_id(args.task_id)
+            if not valid:
+                raise ValueError(reason)
+            state = state_for(args.task_id, root)
+            selected_project = _markdown_value(args.project)
+            if selected_project not in {_project_name(row) for row in state.get("projects", [])}:
+                raise ValueError("project is not declared in this task: " + selected_project)
+            payload = record_rework(args.task_id, root, {
+                "id": args.event_id, "type": args.type, "loop": args.loop, "project": selected_project,
+                "from_stage": args.from_stage, "to_stage": args.to_stage, "occurred_at": args.occurred_at,
+                "reason": args.reason, "acceptance": args.acceptance, "evidence": args.evidence,
+            })
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+        if args.command in ("delivery-check", "delivery-record"):
+            valid, reason = validate_task_id(args.task_id)
+            if not valid:
+                raise ValueError(reason)
+            state = state_for(args.task_id, root)
+            action = record_delivery if args.command == "delivery-record" else check_delivery
+            payload = action(args.task_id, root, state)
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0 if payload["status"] == "CURRENT" else 2
         if args.command == "metrics-start":
-            result = start_stage_metrics(args.task_id, root, args.stage, args.started_at)
+            result = start_stage_metrics(args.task_id, root, args.stage, args.started_at, args.project)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         if args.command == "metrics-record":
@@ -811,6 +1064,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 Path(args.codex_home).resolve() if args.codex_home else None,
                 args.omp_session_file,
                 Path(args.omp_agent_dir).resolve() if args.omp_agent_dir else None,
+                args.project,
+                args.waiting_seconds,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
