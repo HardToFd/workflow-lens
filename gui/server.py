@@ -2,6 +2,7 @@
 """Local, dependency-free GUI for the Markdown workflow."""
 
 import argparse
+import copy
 import fnmatch
 import hashlib
 import json
@@ -24,6 +25,8 @@ if str(WORKSPACE_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_PACKAGE_ROOT))
 
 from workflow.core import GATES, STAGES, validate_task_id
+from workflow.delivery import INPUTS as DELIVERY_INPUTS, SNAPSHOT as DELIVERY_SNAPSHOT, check_delivery
+from workflow.lifecycle import read_lifecycle
 
 TOP_FIELDS = {
     "环节": "phase",
@@ -97,6 +100,12 @@ def split_table_row(line: str) -> List[str]:
     if not (stripped.startswith("|") and stripped.endswith("|")):
         return []
     return [cell.strip() for cell in stripped[1:-1].split("|")]
+
+
+def normalize_state_cell(value: str) -> str:
+    # 只去掉包住整格的代码样式，保留“`分支`（历史说明）”中的原始绑定文本。
+    matched = re.fullmatch(r"(`+)(.*?)\1", value.strip())
+    return matched.group(2).strip() if matched else value.strip()
 
 
 def replace_bullet(content: str, label: str, value: str) -> str:
@@ -331,7 +340,7 @@ class WorkflowWorkspace:
         pending = [(path, updated, original) for path, updated, original in changes if updated != original]
         if len({str(path) for path, _, _ in pending}) != len(pending):
             raise ApiError(400, "同一文件不能在一次事务中重复写入")
-        for path, _, original in pending:
+        for path, _, original in changes:
             if original is None:
                 if path.exists():
                     raise ApiError(409, "新增文件已存在，请重新检测技能")
@@ -1883,6 +1892,82 @@ class WorkflowWorkspace:
             raise ApiError(409, "config/projects.md 没有项目或存在重复项目")
         return projects, lines, project_sections
 
+    def _json_project_row(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        branch = data.get("branch_model", {})
+        dual = data.get("dual_baseline", {})
+        conventions = data.get("conventions", [])
+        commands = data.get("verification", [])
+        extensions = data.get("extensions", [])
+        if any(not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values)
+               for values in (conventions, commands, extensions)) or not commands or not isinstance(dual, dict):
+            raise ApiError(409, "JSON 项目规范、验证命令或扩展列表不合法")
+        if not isinstance(branch, dict) or any(
+            not isinstance(branch.get(key), str) or not branch[key]
+            for key in ("base", "feature", "delivery_target")
+        ):
+            raise ApiError(409, "JSON 项目分支模型不完整")
+        if data.get("read_only"):
+            branch_text = "固定读取 `{base}`;不创建需求分支;交付目标为 `{delivery_target}`".format(**branch)
+        else:
+            branch_text = "从 `{base}` 拉 `{feature}`".format(**branch)
+            if "dual-baseline-test" in data.get("extensions", []):
+                if not isinstance(dual, dict) or not all(dual.get(key) for key in ("test_base", "test_branch", "integration")):
+                    raise ApiError(409, "JSON 项目双基线配置不完整")
+                branch_text += ";从 `{test_base}` 拉 `{test_branch}`".format(**dual)
+            branch_text += ";MR 合入 `{delivery_target}`".format(**branch)
+        return {
+            "name": data["name"], "path": data["path"],
+            "specifications": "、".join(self._code(value) for value in conventions) or "无，遵循仓库既有代码风格",
+            "commands": list(commands), "branch_model": branch_text.replace("<id>", "<需求id>"),
+            "extension": ", ".join(extensions) or "无", "integration": dual.get("integration", ""),
+        }
+
+    def _project_settings_snapshot(self, markdown: str) -> Tuple[List[Dict[str, Any]], str, Optional[Dict[str, Any]]]:
+        index_path = self._safe_path(self.config, "projects", "index.json")
+        if not index_path.exists():
+            rows, _, _ = self._parse_projects(markdown)
+            return rows, self._revision(markdown), None
+        index_content = self._read_preserved(index_path, "项目索引")
+        try:
+            index = json.loads(index_content)
+        except (ValueError, RecursionError):
+            raise ApiError(409, "项目索引不是有效 JSON")
+        if not isinstance(index, dict) or index.get("schema_version") != 1 or not isinstance(index.get("projects"), list):
+            raise ApiError(409, "项目索引结构不合法")
+        if not 1 <= len(index["projects"]) <= MAX_PROJECTS:
+            raise ApiError(409, "项目索引数量不合法")
+        rows = []
+        details = {}
+        sources = [("config/projects.md", markdown), ("config/projects/index.json", index_content)]
+        detail_paths = set()
+        for entry in index["projects"]:
+            if not isinstance(entry, dict) or any(not isinstance(entry.get(key), str) or not entry[key]
+                                                  for key in ("name", "path", "detail")):
+                raise ApiError(409, "项目索引注册项不完整")
+            relative = Path(entry["detail"])
+            # 配置文件写入只允许在注册目录内；不能把 detail 指向业务代码、父目录或链接。
+            if relative.is_absolute() or ".." in relative.parts or relative.parts[:2] != ("config", "projects") or relative.suffix != ".json":
+                raise ApiError(400, "项目详情路径必须位于 config/projects/ 内")
+            path = self._safe_path(self.root, *relative.parts)
+            if path == index_path or path in detail_paths or entry["name"] in details:
+                raise ApiError(409, "项目索引包含重复名称或详情路径")
+            if not path.is_file():
+                raise ApiError(409, "项目详情文件不存在: " + entry["detail"])
+            content = self._read_preserved(path, entry["detail"])
+            try:
+                data = json.loads(content)
+            except (ValueError, RecursionError):
+                raise ApiError(409, "项目详情不是有效 JSON: " + entry["detail"])
+            if not isinstance(data, dict) or data.get("name") != entry["name"] or data.get("path") != entry["path"]:
+                raise ApiError(409, "项目索引与详情的名称或路径不一致")
+            rows.append(self._json_project_row(data))
+            details[entry["name"]] = (path, content, data)
+            detail_paths.add(path)
+            sources.append((entry["detail"], content))
+        # 任一详情、索引或兼容视图变化都会使旧页面失效，避免覆盖 CLI/人工的新设置。
+        revision = self._revision(json.dumps(sources, ensure_ascii=False))
+        return rows, revision, {"path": index_path, "content": index_content, "index": index, "details": details}
+
     def _project_location(
         self,
         value: Any,
@@ -2006,7 +2091,7 @@ class WorkflowWorkspace:
             _, projects_content = self._read_config("projects.md")
             _, capabilities_content = self._read_config("capabilities.md")
             skill_rows, skill_catalog, _, _ = self._skills_snapshot(skills_content)
-            project_rows, _, _ = self._parse_projects(projects_content)
+            project_rows, project_revision, _ = self._project_settings_snapshot(projects_content)
             return {
                 "skills": {
                     "revision": self._revision(skills_content),
@@ -2014,7 +2099,7 @@ class WorkflowWorkspace:
                     "catalog": [{key: value for key, value in item.items() if not key.startswith("_")} for item in skill_catalog],
                     "stages": list(STAGES),
                 },
-                "projects": {"revision": self._revision(projects_content), "rows": project_rows},
+                "projects": {"revision": project_revision, "rows": project_rows},
                 "capabilities": {
                     "revision": self._revision(capabilities_content),
                     "mode": self._parse_capability_mode(capabilities_content),
@@ -2138,13 +2223,17 @@ class WorkflowWorkspace:
             skill_changes.append((path, updated, original))
         return "".join(lines), skill_changes
 
-    def _normalize_project_payload(self, item: Any) -> Dict[str, Any]:
+    def _normalize_project_payload(self, item: Any, registered_path: Optional[str] = None) -> Dict[str, Any]:
         if not isinstance(item, dict):
             raise ApiError(400, "项目设置行不合法")
         name = self._clean_setting(item.get("name"), "项目名", 120)
         if name in ("注册项模板", "跨项目需求约定"):
             raise ApiError(400, "项目名与配置保留节冲突")
-        path_value, project_path = self._project_location(item.get("path"), must_exist=False)
+        if registered_path is not None and item.get("path") == registered_path:
+            # 已登记的外部只读迁移源可以原值保留；新增/改址仍必须通过工作区路径检查。
+            path_value, project_path = registered_path, (self.root / registered_path).resolve()
+        else:
+            path_value, project_path = self._project_location(item.get("path"), must_exist=False)
         specifications = self._clean_setting(item.get("specifications"), "规范文件", 5000)
         branch_model = self._clean_setting(item.get("branch_model"), "分支模型", 5000)
         command_values = item.get("commands")
@@ -2267,6 +2356,150 @@ class WorkflowWorkspace:
             raise ApiError(500, "项目配置生成后校验失败")
         return prepared
 
+    def _apply_project_fields(self, data: Dict[str, Any], row: Dict[str, Any]) -> None:
+        specifications = row["specifications"]
+        if specifications in ("无", "无，遵循仓库既有代码风格", "无,遵循既有代码风格"):
+            conventions = []
+        else:
+            conventions = [self._unwrap_code(value.strip()) for value in re.split(r"[、,，;；]", specifications)]
+            if any(not value or "`" in value for value in conventions):
+                raise ApiError(400, "规范文件请使用顿号分隔的文件清单")
+        text = row["branch_model"].replace("<需求id>", "<id>")
+        text = re.sub(r"\s*[;；,，]\s*", ";", text)
+        if data.get("read_only"):
+            match = re.fullmatch(r"固定读取 `([^`]+)`;不创建需求分支;交付目标为 `([^`]+)`", text)
+            if not match:
+                raise ApiError(400, "只读项目须保留固定读取、不创建需求分支的分支模型")
+            values = {"base": match[1], "feature": "disabled", "delivery_target": match[2]}
+        else:
+            match = re.fullmatch(
+                r"从 `([^`]+)` 拉 `([^`]+)`(?: 开发)?(?:;从 `([^`]+)` 拉 `([^`]+)`(?: 联测)?)?;MR 合入 `([^`]+)`", text
+            )
+            if not match or "<id>" not in match[2]:
+                raise ApiError(400, "分支模型须使用“从 `origin/main` 拉 `feature/<需求id>`;MR 合入 `main`”格式")
+            values = {"base": match[1], "feature": match[2], "delivery_target": match[5]}
+            dual_enabled = "dual-baseline-test" in data.get("extensions", [])
+            if bool(match[3]) != dual_enabled:
+                raise ApiError(400, "分支模型的联测段须与已登记的流程扩展一致")
+            if dual_enabled:
+                if (match[1], match[2], match[3], match[4], match[5]) != ("origin/master", "feature/<id>", "origin/dev", "test/<id>", "master"):
+                    raise ApiError(400, "dual-baseline-test 必须保留 master/dev、feature/test 及 MR 合入 master 的固定契约")
+                data["dual_baseline"].update({"test_base": match[3], "test_branch": match[4]})
+        data.setdefault("branch_model", {}).update(values)
+        data.update({"path": row["path"], "conventions": conventions, "verification": row["commands"]})
+
+    def _json_projects_markdown(self, content: str, index: Dict[str, Any], details: Dict[str, Dict[str, Any]], old_paths: Dict[str, str]) -> str:
+        lines, sections = self._markdown_sections(content)
+        newline = self._newline(content)
+        remaining = {entry["name"]: entry for entry in index["projects"]}
+        replacements = []
+        for title, start, end in sections:
+            fields = self._section_fields(lines[start:end])
+            if "路径" not in fields:
+                continue
+            old_path = self._unwrap_code(fields["路径"][1])
+            name = title if title in remaining else next((name for name in remaining if old_paths.get(name) == old_path), None)
+            if name is None:
+                # 未登记节可能是用户保留的迁移说明；JSON 更新不授权删除这些兼容记录。
+                continue
+            entry = remaining.pop(name)
+            data = details[name]
+            row = self._json_project_row(data)
+            if all(label in fields for label in ("规范文件", "验证命令", "分支模型")):
+                section = self._update_project_section(lines[start:end], row)
+                section[0] = "## " + name + newline
+            else:
+                section = self._new_project_section(row, newline)
+            replacements.append((start, end, self._json_project_metadata(section, entry, data, row, newline)))
+        for start, end, section in reversed(replacements):
+            lines[start:end] = section
+        result = "".join(lines)
+        for name, entry in remaining.items():
+            row = self._json_project_row(details[name])
+            section = self._new_project_section(row, newline)
+            result = result.rstrip("\r\n") + newline * 2 + "".join(self._json_project_metadata(section, entry, details[name], row, newline))
+        if len(result.encode("utf-8")) > MAX_FILE:
+            raise ApiError(413, "项目配置超过大小上限")
+        return result
+
+    def _json_project_metadata(self, section: List[str], entry: Dict[str, Any], data: Dict[str, Any], row: Dict[str, Any], newline: str) -> List[str]:
+        metadata = {"流程扩展": row["extension"], "过程产物入库": "允许" if data.get("process_artifacts_in_repository") else "禁止"}
+        if data.get("stack"):
+            metadata["技术栈"] = " / ".join(data["stack"])
+        if entry.get("signals"):
+            metadata["判定信号"] = "、".join(entry["signals"])
+        if row["integration"]:
+            metadata["联测方式"] = row["integration"]
+        if data.get("modification_policy"):
+            metadata["修改策略"] = data["modification_policy"]
+        tracking = data.get("change_tracking", {})
+        if tracking.get("document_path"):
+            metadata["变更文档"] = ("必需;" if tracking.get("required") else "可选;") + self._code(tracking["document_path"])
+            if tracking.get("document_project"):
+                metadata["变更文档"] += ";目标项目 " + self._code(tracking["document_project"])
+            if tracking.get("central_changelog"):
+                metadata["变更文档"] += ";集中日志 " + self._code(tracking["central_changelog"])
+        if data.get("approval_policy"):
+            metadata["审批策略"] = ",".join("{}={}".format(risk, self._code(policy)) for risk, policy in data["approval_policy"].items())
+        fields = self._section_fields(section)
+        for label, value in metadata.items():
+            line = "- {}: {}{}".format(label, value, newline)
+            if label in fields:
+                section[fields[label][0]] = line
+            else:
+                if section and not section[-1].endswith(("\r", "\n")):
+                    section[-1] += newline
+                section.append(line)
+        return section
+
+    def _prepare_json_projects(self, content: str, payload: Any, registry: Dict[str, Any]) -> Tuple[str, List[Tuple[Path, str, Optional[str]]]]:
+        if not isinstance(payload, list) or not 1 <= len(payload) <= MAX_PROJECTS:
+            raise ApiError(400, "项目设置数量不合法")
+        old = registry["details"]
+        rows = [self._normalize_project_payload(item, old[item["name"]][2]["path"] if isinstance(item, dict) and item.get("name") in old else None) for item in payload]
+        names = [row["name"] for row in rows]
+        if len(set(names)) != len(names) or not set(old).issubset(names):
+            raise ApiError(400, "既有项目不能删除、改名或重复")
+        if len({row["_path_key"] for row in rows}) != len(rows):
+            raise ApiError(400, "项目路径不能重复注册")
+        index = copy.deepcopy(registry["index"])
+        entries = {entry["name"]: entry for entry in index["projects"]}
+        updated_details = {}
+        changes = []
+        for row in rows:
+            name = row["name"]
+            previous = old.get(name)
+            if previous is None or row["path"] != previous[2]["path"]:
+                if not self._valid_git_root(Path(row["_path_key"])):
+                    raise ApiError(400, "新增或修改的项目路径必须是 Git 仓库根目录")
+            if previous:
+                path, original, data = previous
+                # 只更新界面字段，审批、安全、生成规则以及后续新增的 JSON 字段均原样继承。
+                data = copy.deepcopy(data)
+            else:
+                filename = name if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", name) else "project-" + self._revision(name)[:16]
+                path = self._safe_path(self.config, "projects", filename + ".json")
+                if path == registry["path"] or path.exists() or path in [value[0] for value in old.values()]:
+                    raise ApiError(409, "新增项目详情路径已占用")
+                original = None
+                data = {"schema_version": 1, "name": name, "stack": [], "extensions": [],
+                        "change_tracking": {"required": True, "document_path": "docs/changes/<id>.md"},
+                        "approval_policy": {"R0": "auto", "R1": "gate_b", "R2": "gate_b", "R3": "gate_b"},
+                        "process_artifacts_in_repository": False}
+                entries[name] = {"name": name, "path": row["path"], "signals": [name], "detail": path.relative_to(self.root).as_posix()}
+            self._apply_project_fields(data, row)
+            entries[name]["path"] = row["path"]
+            updated_details[name] = data
+            updated = original if previous and data == previous[2] else json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+            if len(updated.encode("utf-8")) > MAX_FILE:
+                raise ApiError(413, "项目详情超过大小上限")
+            changes.append((path, updated, original))
+        index["projects"] = [entries[name] for name in names]
+        updated_index = registry["content"] if index == registry["index"] else json.dumps(index, ensure_ascii=False, indent=2) + "\n"
+        changes.append((registry["path"], updated_index, registry["content"]))
+        markdown = self._json_projects_markdown(content, index, updated_details, {name: value[2]["path"] for name, value in old.items()})
+        return markdown, changes
+
     def _prepare_capabilities(self, content: str, mode: Any) -> str:
         if mode not in CAPABILITY_MODES:
             raise ApiError(400, "运行档位偏好不合法")
@@ -2298,15 +2531,20 @@ class WorkflowWorkspace:
             skills_path, skills_content = self._read_config("skills.md")
             projects_path, projects_content = self._read_config("projects.md")
             capabilities_path, capabilities_content = self._read_config("capabilities.md")
-            sections = (("skills", skills_content), ("projects", projects_content), ("capabilities", capabilities_content))
-            for key, current in sections:
+            _, project_revision, registry = self._project_settings_snapshot(projects_content)
+            sections = (("skills", self._revision(skills_content)), ("projects", project_revision), ("capabilities", self._revision(capabilities_content)))
+            for key, revision in sections:
                 value = payload.get(key)
-                if not isinstance(value, dict) or value.get("revision") != self._revision(current):
+                if not isinstance(value, dict) or value.get("revision") != revision:
                     raise ApiError(409, "配置已被其他程序修改，请重新打开设置")
             updated_skills, skill_changes = self._prepare_skills(skills_content, payload["skills"].get("rows"))
-            updated_projects = self._prepare_projects(projects_content, payload["projects"].get("rows"))
+            if registry is None:
+                updated_projects = self._prepare_projects(projects_content, payload["projects"].get("rows"))
+                project_changes = []
+            else:
+                updated_projects, project_changes = self._prepare_json_projects(projects_content, payload["projects"].get("rows"), registry)
             updated_capabilities = self._prepare_capabilities(capabilities_content, payload["capabilities"].get("mode"))
-            changes = skill_changes + [
+            changes = skill_changes + project_changes + [
                 (skills_path, updated_skills, skills_content),
                 (projects_path, updated_projects, projects_content),
                 (capabilities_path, updated_capabilities, capabilities_content),
@@ -2317,19 +2555,20 @@ class WorkflowWorkspace:
 
     def parse_state(self, content: str) -> Dict[str, Any]:
         top = {}  # type: Dict[str, str]
+        top_content = re.split(r"(?m)^## ", content, maxsplit=1)[0]
         for label, key in TOP_FIELDS.items():
-            match = re.search(r"^- " + re.escape(label) + r":\s*(.*)$", content, re.MULTILINE)
+            match = re.search(r"^- " + re.escape(label) + r":[ \t]*(.*)$", top_content, re.MULTILINE)
             if match:
-                top[key] = match.group(1).strip()
+                top[key] = normalize_state_cell(match.group(1))
 
         lines = content.splitlines()
         header_index = -1
         headers = []  # type: List[str]
         for index, line in enumerate(lines):
             cells = split_table_row(line)
-            if "项目" in cells and "行状态" in cells:
+            if "项目" in cells and ("行状态" in cells or "状态" in cells):
                 header_index = index
-                headers = cells
+                headers = ["行状态" if cell == "状态" else cell for cell in cells]
                 break
 
         projects = []  # type: List[Dict[str, str]]
@@ -2340,7 +2579,7 @@ class WorkflowWorkspace:
                 cells = split_table_row(line)
                 if len(cells) != len(headers):
                     continue
-                raw = dict(zip(headers, cells))
+                raw = dict(zip(headers, [normalize_state_cell(cell) for cell in cells]))
                 projects.append({key: raw.get(label, "") for label, key in PROJECT_FIELDS.items()})
 
         return {"top": top, "projects": projects}
@@ -2433,6 +2672,7 @@ class WorkflowWorkspace:
                     "title": first_heading(prd, task_id),
                     "phase": state["top"].get("phase", "未开始"),
                     "status": state["top"].get("status", "仅有 PRD"),
+                    "lifecycle": read_lifecycle(state_content, state["top"].get("phase"), state["top"].get("status")),
                     "project_count": len(state["projects"]),
                     "revision": self._revision(
                         prd + "\0" + state_content + "\0" + "|".join(snapshot["stamps"])
@@ -2448,6 +2688,7 @@ class WorkflowWorkspace:
         prd = snapshot["contents"]["prd"]
         state_content = snapshot["contents"]["state"]
         state = snapshot["state"]
+        delivery_status = self._delivery_status(task_id, state)
 
         actions = []  # type: List[Dict[str, Any]]
         if state_content and not snapshot["errors"]:
@@ -2492,15 +2733,25 @@ class WorkflowWorkspace:
             "top": state["top"],
             "projects": state["projects"],
             "artifacts": artifacts,
+            "delivery": delivery_status,
+            "lifecycle": read_lifecycle(state_content, state["top"].get("phase"), state["top"].get("status")),
             "actions": actions,
             "diagnostic": "、".join(snapshot["errors"]) + " 读取失败" if snapshot["errors"] else "",
             "run_prompt": "读 AGENTS.md，执行需求 {}；先运行 python workflow/workflowctl.py context {}，只加载当前阶段文件。".format(task_id, task_id),
         }
 
+    def _delivery_status(self, task_id: str, parsed: Dict[str, Any]) -> Dict[str, Any]:
+        return check_delivery(task_id, self.root, {"环节": parsed["top"].get("phase"), "projects": parsed["projects"]})
+
     def read_artifact(self, task_id: str, name: str) -> Dict[str, str]:
         path = self._artifact_path(task_id, name)
         label = dict(ARTIFACTS)[name]
-        return {"name": name, "label": label, "content": self._read_text(path)}
+        content = self._read_text(path)
+        if name == "delivery.md":
+            status = self._delivery_status(task_id, self._task_snapshot(task_id)["state"])
+            if status["status"] in ("STALE", "UNVERIFIED"):
+                content = "> 交付材料 {}：请复核并更新材料，再执行 delivery-record 登记；当前内容不能用于闸口 C。\n\n".format(status["status"]) + content
+        return {"name": name, "label": label, "content": content}
 
     @staticmethod
     def _clean_field(value: Any, label: str, required: bool = False, limit: int = 20000) -> str:
@@ -2672,19 +2923,34 @@ class WorkflowWorkspace:
                 state_content = replace_bullet(state_content, "闸口B", '已通过 {}("{}")'.format(today, one_line))
                 detail = "闸口 B 已批准"
             else:
+                if self._delivery_status(task_id, parsed)["status"] != "CURRENT":
+                    raise ApiError(409, "交付材料缺失、过期或未登记；请复核并重建 delivery.md，再执行 delivery-record 后确认闸口 C")
                 project = self._clean_field(payload.get("project"), "项目", required=True, limit=120)
                 result = payload.get("result")
                 if result not in ("已合并", "已验收(无MR)"):
                     raise ApiError(400, "闸口 C 结果不合法")
                 state_content = self._update_project_gate(state_content, project, result)
                 delivery = self._safe_path(self.work, task_id, "delivery.md")
-                changes.append(
-                    self._gate_record_change(
-                        delivery,
-                        "闸口C确认 " + today,
-                        ["- 项目: " + project, "- 结果: " + result, "- 原话: " + one_line],
-                    )
+                delivery_change = self._gate_record_change(
+                    delivery,
+                    "闸口C确认 " + today,
+                    ["- 项目: " + project, "- 结果: " + result, "- 原话: " + one_line],
                 )
+                changes.append(delivery_change)
+                snapshot_path = self._safe_path(self.work, task_id, DELIVERY_SNAPSHOT)
+                snapshot_original = self._read_preserved(snapshot_path, DELIVERY_SNAPSHOT)
+                delivery_snapshot = json.loads(snapshot_original)
+                # Gate C 只追加审批记录；仅刷新该输出哈希，不能重新签署已变化的输入或其他附件。
+                if delivery_snapshot.get("artifacts", {}).get("delivery.md") != self._revision(delivery_change[2]):
+                    raise ApiError(409, "交付材料已被其他程序修改，请重新复核")
+                for name in DELIVERY_INPUTS:
+                    input_path = self._safe_path(self.work, task_id, name)
+                    input_content = self._read_preserved(input_path, name)
+                    if delivery_snapshot.get("inputs", {}).get(name) != self._revision(input_content):
+                        raise ApiError(409, "交付依据已被其他程序修改，请重新复核")
+                    changes.append((input_path, input_content, input_content))
+                delivery_snapshot["artifacts"]["delivery.md"] = self._revision(delivery_change[1])
+                changes.append((snapshot_path, json.dumps(delivery_snapshot, ensure_ascii=False, indent=2) + "\n", snapshot_original))
                 detail = "{}: {}".format(project, result)
             changes.append((state_path, state_content, state_original))
             self._atomic_write_many(changes)
@@ -2990,6 +3256,14 @@ def run_self_test() -> None:
         app.approve_gate("demo-1", {"gate": "B", "quote": "同意方案"})
         after_b = (task_work / "state.md").read_text(encoding="utf-8")
         app._atomic_write(task_work / "state.md", replace_bullet(after_b, "环节", "S5"))
+        from workflow.delivery import record_delivery
+        for name in DELIVERY_INPUTS:
+            (task_work / name).write_text("# reviewed fixture\n", encoding="utf-8")
+        (task_work / "delivery.md").write_text("# delivery\n\n- 交付状态: CURRENT\n", encoding="utf-8")
+        delivery_state = app.parse_state((task_work / "state.md").read_text(encoding="utf-8"))
+        record_delivery("demo-1", root, {"环节": "S5", "projects": delivery_state["projects"]})
+        gate_c_delivery_before = (task_work / "delivery.md").read_bytes()
+        gate_c_snapshot_before = (task_work / DELIVERY_SNAPSHOT).read_bytes()
         gate_c_state_before = (task_work / "state.md").read_bytes()
         app._atomic_write = fail_gate_state
         try:
@@ -3005,7 +3279,8 @@ def run_self_test() -> None:
         finally:
             app._atomic_write = original_gate_atomic_write
         assert (task_work / "state.md").read_bytes() == gate_c_state_before
-        assert not (task_work / "delivery.md").exists()
+        assert (task_work / "delivery.md").read_bytes() == gate_c_delivery_before
+        assert (task_work / DELIVERY_SNAPSHOT).read_bytes() == gate_c_snapshot_before
         detail = app.approve_gate(
             "demo-1",
             {"gate": "C", "project": "demo-project", "result": "已合并", "quote": "已合并，可以归档"},
@@ -3015,6 +3290,7 @@ def run_self_test() -> None:
         assert detail["top"]["phase"] == "S6" and detail["top"]["status"] == "进行中"
         assert detail["projects"][0]["gate_c"] == "已合并"
         assert detail["projects"][0]["phase"] == "S6" and detail["projects"][0]["row_status"] == "进行中"
+        assert detail["delivery"]["status"] == "CURRENT"
         assert "选择方案一" in (task_work / "questions.md").read_text(encoding="utf-8")
         assert "已合并，可以归档" in (task_work / "delivery.md").read_text(encoding="utf-8")
         expect_api_error(409, lambda: app.approve_gate("demo-1", {"gate": "C", "project": "demo-project", "result": "已合并", "quote": "重复"}))

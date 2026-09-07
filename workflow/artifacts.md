@@ -6,7 +6,7 @@
 prds/<id>.md                # 需求输入区:只有人类放入,代理只读
 work/<id>/                  # 过程产物区:代理读写,按需求id隔离
   state.md                  #   进度真相(格式见 protocol.md §3)
-  metrics.md                #   S1～S6 token/返工/效率比/墙钟用时唯一文档
+  metrics.md                #   S1～S6 token/区间用时/等待与唯一返工事件文档
   questions.md              #   闸口A 问答记录(有闸口A才存在)
   analysis.md               #   S1 产物
   plan.md                   #   S2 产物(含修订记录)
@@ -16,6 +16,8 @@ work/<id>/                  # 过程产物区:代理读写,按需求id隔离
   impl-log.md               #   S3 产物
   verify.md                 #   S4 产物(逐轮追加)
   delivery.md               #   S5 产物(含评审回流轮次)
+  delivery-snapshot.json    #   已复核交付的输入/附件指纹；delivery-record 写，delivery-check 只读校验
+  delivery/history/         #   失效补丁、旧交付快照；不属于当前交付集合
   scratch/                  #   代理草稿(调研笔记等),交接时可丢弃,其余文件不可丢
 <目标项目>/                 # 代码产物区:只在注册分支模型定义的需求分支改动,commit 属于目标仓库
 workflow/ config/ skills/   # 工作流本体:改它=改流程,需人类同意,不随需求变动
@@ -38,16 +40,20 @@ workflow/ config/ skills/   # 工作流本体:改它=改流程,需人类同意,�
 
 **impact-map-review.md**(按需):Archify 与 Diagram Design 的挂载文件、外部入口和执行时间 / 图类型与语义模式 / Archify validate、deliver、visual-check 结果 / Diagram Design 复杂度、可访问性、连接线与标签 taste gate / 与 analysis/plan 的逐项一致性 / 未解决项(无则写"无")；该产物不参与 S2 或 Gate B 完成判定
 
-**metrics.md**:每次阶段尝试一节，记录结果 / 开始与结束 UTC+8（ISO 8601 `+08:00`） / 墙钟秒数 / token 来源及 input、cached input、output、reasoning、total / 返工次数 / 有效产出单元 / 返工影响单元 / 效率比 / 证据备注。精确 token 不可得时写 `NOT_AVAILABLE`，不得估算或填 0。统一口径和命令见 `workflow/references/metrics.md`。
+**metrics.md**:每次阶段尝试一节，记录项目 / 结果 / 开始与结束 UTC+8（ISO 8601 `+08:00`） / 墙钟秒数 / 等待秒数（无证据为 `NOT_AVAILABLE`） / token 来源及 input、cached input、output、reasoning、total / 证据备注。旧返工次数、有效产出单元、返工影响单元、效率比保留为兼容字段，不参与事件汇总或绩效排名。返工单独按唯一事件 ID 追加二级小节，含类型/回路/项目/来源与目标阶段/事件时间/原因/关联验收/证据；同一回流跨阶段仍是一件事。精确 token 不可得时写 `NOT_AVAILABLE`，不得估算或填 0。统一口径和命令见 `workflow/references/metrics.md`。
+
+**state.md 当前摘要**:用唯一 `## 当前状态摘要` 分别记录生命周期、关闭原因、交付形态、人工验收、合入、部署、清理、状态依据与检查时间；枚举以 manifest 为准，格式见 protocol §3。S6 只代表归档，不能替代验收/部署证据。`## 资源当前清单` 按唯一资源 ID 保存精确对象、归属、可再生文件证据、清理授权、状态及最后核验；晚到的清理证据同步此处，旧记录保留历史。
 
 **impl-log.md**:分支与项目 / 完成项对照(改动#|状态|commit) / 正式变更文档路径与提交 hash / 偏离记录(原定|实际|原因|是否需回闸口B) / 遗留给S4
 
 **verify.md**(每轮一节,**节标题须含项目名与该项目回修轮次**,如"## <项目名> 第2轮"):检查与测试表(项|命令|结果|备注) / 变更文档检查(路径|feature 提交 hash|test 提交 hash|结果|证据) / 验收标准核对表(标准#|动作|结果|证据) / 自审发现(问题|严重度|处置) / 结论(通过→S5 | 回修点 | BLOCKED)。**"结果"列只允许四态 PASS/FAIL/NOT_RUN/BLOCKED**(语义与流转见 stages.md S4),NOT_RUN 必须附原因。启用 dual-baseline-test 的项目额外含:联测小节(每轮“精确分支名 + 本轮基线 SHA + 本轮提交集合”绑定记录及冲突处置,并明确变更文档提交已移植)、**"联测分支历史"精确列表**(每轮 test 分支名,供 S6 清理)
 
-**delivery.md**:分支与MR / 需求与实现摘要 / 改动清单 / 正式变更文档路径与验证结论 / 验证结论摘要 / 评审重点提示 / 部署上线注意 / 评审回流记录(第N轮|意见|处置)
+**delivery.md**:当前交付状态（`- 交付状态: CURRENT` 或 `STALE`）/ 生效方案版本与 feature、test SHA / 分支与MR / 需求与实现摘要 / 改动清单 / 正式变更文档路径与验证结论 / 验证结论摘要 / 评审重点提示 / 部署上线注意 / 评审回流记录(第N轮|意见|处置)。当前摘要与新方案必须同步，失效合同、旧 SHA 和旧 MR 草稿只能放在明确标注的历史材料中。
+
+**delivery-snapshot.json**:由 `delivery-record` 对方案、实现记录、验证记录、已有 PRD/分析、当前交付正文和附件登记 SHA-256，并绑定项目/feature/test 描述和待交付项目集合。`delivery-check` 和 `context.delivery` 只读比较，内容/附件/分支绑定变化、已交付项目回流或新增待交付项目即报告 STALE；正常 S5→S6 不失效。缺快照为 UNVERIFIED，不能冒充 CURRENT。快照只证明记录一致，不证明测试、发布或人工批准。快照与历史附件均为过程产物，不进入目标项目需求提交。
 
 ## 书写纪律
 
 - 所有产物开头都有"摘要"性内容(analysis 的复述、plan 的审批摘要、verify 的结论)——**为小上下文窗口的代理和赶时间的人类服务**:只读摘要即可决策,细节按需下钻。
 - 引用代码一律 `路径:行号` 或 `路径(函数名)`;引用其他产物用文件名+小节。
-- 追加式产物(verify、delivery)不改写历史轮次,只追加新节。
+- verify 的历史验证和 delivery 的历史轮次不改写。delivery 的当前摘要可在先按原字节保留旧版本后更新，历史独立存放并链接；不能让早期摘要继续充当最终交付说明。

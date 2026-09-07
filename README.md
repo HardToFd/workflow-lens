@@ -44,7 +44,7 @@ PRD 入 prds/
 
 | 你是 | 读 |
 |------|-----|
-| **AI 代理**(任何平台) | `AGENTS.md` → `metrics-start <id>` → `workflowctl context <id>` → 当前阶段 Skill + 静态挂载技能 |
+| **AI 代理**(任何平台) | `AGENTS.md` → `workflowctl context <id>` → 确认可执行项目 → `metrics-start <id>` → 当前阶段 Skill + 静态挂载技能 |
 | **人类使用者** | 本文件 + `prds/TEMPLATE.md`(怎么写 PRD)即可上手 |
 | **移植者** | `PORTING.md` |
 | **要改流程的人** | `workflow/manifest.json` + 对应阶段 Skill；边界细节按需读 `workflow/protocol.md` |
@@ -117,4 +117,10 @@ python gui/server.py --self-test --workspace .
 
 第一条检查入口和阶段上下文预算、机器清单及项目配置；第二条验证共享核心与旧状态兼容；第三条验证 GUI。
 
-每个阶段先运行 `metrics-start`，退出前运行 `metrics-record`；开始和结束时间统一显示为 UTC+8（ISO 8601 `+08:00`）。有效 Codex session id 优先从 `token_count.info.last_token_usage` 采集精确增量并去重；OMP 环境从当前主 session 及其嵌套 agent 的 assistant `usage` / `model_usage` 按阶段窗口汇总。其他环境仍可显式传值，无法核验时写 `NOT_AVAILABLE`。`metrics.md` 与按需生成的影响面图均为过程产物，不得加入任何目标项目的需求 commit 或 MR/PR。
+交付前核对当前方案、实现和验证后，在 `delivery.md` 顶部标记 `- 交付状态: CURRENT`，运行 `python workflow/workflowctl.py delivery-record <id>` 登记内容快照；发布或 Gate C 前运行 `python workflow/workflowctl.py delivery-check <id>`。内容、附件或分支绑定变化后会报告 STALE，旧补丁只保留在 `delivery/history/`；没有快照的历史材料报告 UNVERIFIED。`context` 同时提供只读的交付状态。CURRENT 仅表示内容一致，原有验证和人工授权仍须满足。
+
+先用 `context` 选择可执行项目，每阶段运行 `metrics-start`，退出前运行 `metrics-record`；跨项目使用相同 `--project <注册名>`，S1/S2 保持需求级。开始和结束显示 UTC+8（ISO 8601 `+08:00`）。Codex 优先从 `token_count.info.last_token_usage` 采集精确增量；OMP 从当前主 session 及嵌套 agent 的 `usage` / `model_usage` 汇总，无法核验时写 `NOT_AVAILABLE`。`metrics.md` 与按需生成的图均为过程产物，不得加入目标项目需求 commit 或 MR/PR。
+
+用时表示阶段记录区间，包含等待且并行区间可能重叠；有等待证据时传 `--waiting-seconds`，缺失不当零。回流使用 `rework-record` 登记唯一事件，用 `rework-check` 核对；历史返工数字和自填单元比保留原值，不再作为质量/效率排名。完整命令见 [过程度量](workflow/references/metrics.md)。
+
+看板与 `context.lifecycle` 从 `state.md` 的唯一“当前状态摘要”区分归档、作废、人工验收、正式合入、部署和清理；S3 的“完成本地实现”不会归档，S6 也不代表已经上线。旧资料未补字段时保持 UNKNOWN。资源清单按精确对象保留最新清理记录，不能用旧全文备注推断残留。

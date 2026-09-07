@@ -15,14 +15,16 @@ description: Deliver a verified branch or patch with review-ready evidence.
 ## 动作
 
 1. 核对分支、HEAD、工作区和预期提交集合。
-2. 有权限时 push 并创建 MR/PR；无权限时生成 patch、文件清单和可直接使用的 MR/PR 描述。
+2. 先按当前方案、HEAD 与本轮验证生成文件清单、MR/PR 描述及需要的 patch；旧交付物按原字节保留到历史目录，当前摘要不得混入失效合同。
 3. 提供需求摘要、实现摘要、验证证据、评审重点、部署和回滚注意。
 4. 在交付说明中列出正式变更文档路径、集中日志路径（如有）及其验证结论。
 5. 跨项目需求明确合并顺序。
+6. 核对当前交付与 `plan.md`、`impl-log.md`、`verify.md` 一致后，在 `delivery.md` 顶部写 `- 交付状态: CURRENT`，执行 `python workflow/workflowctl.py delivery-record <id>` 登记当前内容快照。
+7. push、创建 MR/PR、发送补丁或进入 Gate C 前执行 `python workflow/workflowctl.py delivery-check <id>`，必须为 CURRENT；有权限时按已授权范围交付。STALE 须重新核对和生成，UNVERIFIED 须先核对现有材料再登记，不得用重复登记代替真实复核。
 
 ## 闸口 C
 
-交付后等待合并或无 MR 验收。评审意见编号记录后返回 S3，修复并重新验证。
+交付后等待合并或无 MR 验收。评审意见编号记录后返回 S3，旧交付标记 STALE，修复并重新验证。CURRENT 只表示内容与登记时一致，不代表测试通过、部署或人工验收；闸口 C 仍须按原授权规则确认。
 
 ## 输出
 

@@ -17,6 +17,7 @@ ASSETS: Dict[str, str] = {
     "/tokens.css": "text/css; charset=utf-8",
     "/styles.css": "text/css; charset=utf-8",
     "/app.js": "text/javascript; charset=utf-8",
+    "/scoring.js": "text/javascript; charset=utf-8",
 }
 
 
@@ -73,7 +74,7 @@ def build_dashboard_handler(app: WorkflowWorkspace):
 
 
 def run_self_test(workspace: Path) -> int:
-    required = ("index.html", "tokens.css", "styles.css", "app.js", "README.md")
+    required = ("index.html", "tokens.css", "styles.css", "scoring.js", "app.js", "README.md")
     missing = [name for name in required if not (DASHBOARD_ROOT / name).is_file()]
     if missing:
         raise RuntimeError("missing dashboard assets: " + ", ".join(missing))

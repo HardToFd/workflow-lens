@@ -12,7 +12,7 @@ description: Parse a PRD, select target projects, map acceptance criteria, and i
 ## 输入
 
 - `prds/<id>.md`
-- `config/projects.md`；项目很多时优先读取 `config/projects/index.json`，选中后再读项目详情
+- 存在 `config/projects/index.json` 时以该索引和选中项目 JSON 为权威；仅没有索引时读取兼容入口 `config/projects.md`
 - 已有 `work/<id>/state.md`（恢复时）
 
 ## 动作
@@ -23,6 +23,12 @@ description: Parse a PRD, select target projects, map acceptance criteria, and i
 4. 为每条验收标准定义可执行或可观察的验证方式。
 5. 区分阻塞性歧义与可以明确标注的合理假设。
 6. 根据 `workflow/manifest.json` 评估风险等级 R0～R3。
+
+涉及接口、跨项目字段或存储时，在现有影响面/验收表中补最小合同证据：脱敏真实请求与完整响应样例的来源、日期和环境；ID 来源及关联关系；返回结构前后差异；嵌套字段的 number/string/null/缺失类型；一行或一个消息代表的数据粒度。涉及存储的连接别名、数据库/schema、读写点和测试输出边界分别核对，不能由表名或同名字段推断。只在已有权限内取证，不转储连接凭据。
+
+样例不可得时标记 `CONTRACT_GAP`、缺少内容及对应验收项；合成样例注明合成，不冒充真实媒体/数据验证。只有缺口会导致不同实现且无法作有依据的选择时进入 Gate A；其他缺口随 S2/S4 验证映射继续传递。原失败 payload 脱敏后应保留字段类型、层级和 ID 等价关系，供定向回归复用。
+
+复用既有验证环境证据时按需读 `workflow/references/verification-environment.md`，记录项目、运行时版本、基线和影响面；不因新需求再次启动就重复排查相同环境限制。
 
 ## 输出与完成判据
 

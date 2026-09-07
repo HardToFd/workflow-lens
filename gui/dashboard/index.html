@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light">
-  <title>Workflow Lens · 本地效率仪表盘</title>
+  <title>Workflow Lens · 本地流程证据仪表盘</title>
   <link rel="stylesheet" href="/tokens.css">
   <link rel="stylesheet" href="/styles.css">
+  <script defer src="/scoring.js"></script>
   <script defer src="/app.js"></script>
 </head>
 <body>
@@ -49,7 +50,7 @@
         </button>
         <div class="utility-context">
           <span id="view-context">总览</span>
-          <strong id="context-title">效率与需求事件</strong>
+          <strong id="context-title">状态与过程证据</strong>
         </div>
         <div class="utility-actions">
           <button id="command-trigger" class="command-trigger" type="button" aria-haspopup="dialog" aria-controls="command-dialog">
@@ -81,10 +82,24 @@
             </div>
           </header>
 
-          <section class="metric-ledger reveal" style="--i: 1" aria-label="关键效率指标">
-            <article><span>过程效率比</span><strong id="metric-efficiency">—</strong><small id="metric-rework">返工 — 次</small></article>
-            <article><span>完成平均时长</span><strong id="metric-duration-average">—</strong><small id="metric-duration-range">最短 — · 最长 —</small></article>
-            <article><span>完成平均 Token</span><strong id="metric-token-average">—</strong><small id="metric-token-range">最低 — · 最高 —</small></article>
+          <section id="efficiency-overview" class="score-overview reveal" style="--i: 1" aria-labelledby="efficiency-overview-title">
+            <div class="score-readout" aria-live="polite">
+              <h2 id="efficiency-overview-title">综合效率分</h2>
+              <div><strong id="efficiency-overview-value">N/A</strong><span>/ 100</span></div>
+              <p>按基准时长 T₀ 加权</p>
+            </div>
+            <div class="score-overview__body">
+              <p id="efficiency-overview-coverage" class="score-coverage">正在核对评分依据与记录完整性</p>
+              <p id="efficiency-overview-note" class="score-note">仅纳入已验收、记录完整且基准有效的需求；缺失不补零。</p>
+              <div class="score-weights" aria-label="评分权重"><span>时间 <strong>35%</strong></span><span>Token <strong>25%</strong></span><span>质量 <strong>40%</strong></span></div>
+              <details class="score-scope"><summary>查看评分范围与缺失原因</summary><div id="efficiency-overview-scope"></div></details>
+            </div>
+          </section>
+
+          <section class="metric-ledger reveal" style="--i: 1" aria-label="过程记录与覆盖">
+            <article><span>已登记返工事件</span><strong id="metric-efficiency">NOT_AVAILABLE</strong><small id="metric-rework">唯一事件 ID；历史轮次单独核对</small></article>
+            <article><span>记录区间耗时</span><strong id="metric-duration-average">—</strong><small id="metric-duration-range">显式等待 NOT_AVAILABLE</small></article>
+            <article><span>已记录 Token</span><strong id="metric-token-average">—</strong><small id="metric-token-range">数值覆盖与部分合计</small></article>
             <article><span>需求事件</span><strong id="metric-total">—</strong><small id="metric-total-note">本地 PRD</small></article>
           </section>
 
@@ -111,14 +126,14 @@
             </section>
 
             <section class="dashboard-module dashboard-module--status" aria-labelledby="status-title">
-              <div class="workbench-heading"><div><h2 id="status-title">需求状态</h2><p>归档、进行中、阻塞与作废</p></div></div>
+              <div class="workbench-heading"><div><h2 id="status-title">需求状态</h2><p>归档、进行中、阻塞 / 等待与作废；归档不代表上线</p></div></div>
               <div id="status-chart" class="status-chart"></div>
             </section>
           </div>
 
           <div class="diagnostic-band reveal" style="--i: 4">
             <section class="dashboard-module" aria-labelledby="rework-title">
-              <div class="workbench-heading"><div><h2 id="rework-title">返工原因</h2><p>仅汇总已有失败或返工备注</p></div></div>
+              <div class="workbench-heading"><div><h2 id="rework-title">返工原因</h2><p>按唯一事件 ID 与明确类型汇总；旧阶段轮次不混计</p></div></div>
               <div id="rework-list" class="rework-list"></div>
             </section>
 
@@ -173,7 +188,7 @@
               <div id="detail-content" hidden>
                 <header class="canvas-context">
                   <div class="canvas-context__identity"><span id="detail-id" class="mono-meta"></span><h2 id="detail-title"></h2><div id="detail-badges" class="badge-row"></div></div>
-                  <div class="detail-kpis"><span><small>记录时长</small><strong id="detail-duration">—</strong></span><span><small>Token</small><strong id="detail-tokens">—</strong></span><span><small>效率</small><strong id="detail-efficiency">—</strong></span></div>
+                  <div class="detail-kpis"><span><small>记录区间耗时</small><strong id="detail-duration">—</strong></span><span><small>Token</small><strong id="detail-tokens">—</strong></span><span><small>显式等待</small><strong id="detail-efficiency">NOT_AVAILABLE</strong></span></div>
                 </header>
 
                 <section class="timeline-section" aria-labelledby="timeline-title">
@@ -187,9 +202,13 @@
 
                 <section id="metric-drilldown" class="metric-drilldown" aria-labelledby="metric-drilldown-title">
                   <header class="panel-heading metric-drilldown__heading">
-                    <div><h3 id="metric-drilldown-title">详细指标下钻</h3><p id="metric-drilldown-caption">按当前需求的 metrics.md 汇总阶段投入、效率与回流。</p></div>
+                    <div><h3 id="metric-drilldown-title">详细指标下钻</h3><p id="metric-drilldown-caption">按当前需求的 metrics.md 展示记录区间、数据覆盖与独立返工事件。</p></div>
                     <div class="metric-drilldown__actions"><span id="metric-drilldown-source" class="mono-meta">SOURCE · metrics.md</span><button type="button" class="text-button" data-metric-stage="all" aria-pressed="false">全部阶段</button></div>
                   </header>
+                  <section id="efficiency-detail" class="score-detail" aria-labelledby="efficiency-detail-title">
+                    <header><h4 id="efficiency-detail-title">综合效率分与构成</h4><p>冻结验收项与有效基准决定可评范围；阶段等待只诊断，不重复计分。</p></header>
+                    <div id="efficiency-detail-body"></div>
+                  </section>
                   <div id="metric-drilldown-kpis" class="metric-drilldown__kpis"></div>
                   <div class="metric-drilldown__charts">
                     <article class="metric-panel" aria-labelledby="token-composition-title">
@@ -197,7 +216,7 @@
                       <div id="token-composition-chart" class="token-composition-chart"></div>
                     </article>
                     <article class="metric-panel" aria-labelledby="duration-distribution-title">
-                      <header><div><h4 id="duration-distribution-title">阶段耗时分布</h4><p>按 metrics-start 至阶段退出的已记录墙钟时间聚合</p></div></header>
+                      <header><div><h4 id="duration-distribution-title">阶段耗时分布</h4><p>区间可含等待及重叠；只合计已记录值，不表示净工作时长</p></div></header>
                       <div id="duration-distribution-chart" class="duration-distribution-chart"></div>
                     </article>
                   </div>
@@ -208,7 +227,7 @@
                   <div class="metric-table-wrap">
                     <table class="metric-table">
                       <caption>阶段指标明细；点击阶段名称切换上方诊断</caption>
-                      <thead><tr><th>阶段</th><th>尝试</th><th>最近结果</th><th>记录用时</th><th>Token</th><th>效率</th><th>返工</th></tr></thead>
+                      <thead><tr><th>阶段</th><th>尝试</th><th>最近结果</th><th>记录区间耗时</th><th>Token</th><th>显式等待</th><th>来源阶段事件</th></tr></thead>
                       <tbody id="metric-stage-table"></tbody>
                     </table>
                   </div>
